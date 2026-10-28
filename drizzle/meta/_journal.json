@@ -8,6 +8,34 @@
       "when": 1788785580464,
       "tag": "0000_initial_users",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1793221691982,
+      "tag": "0001_aberrant_korath",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1793222541363,
+      "tag": "0002_chemical_zodiak",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1793223062257,
+      "tag": "0003_curious_paibok",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1793225315137,
+      "tag": "0004_amused_firebrand",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+ALTER TABLE `challenges` MODIFY COLUMN `status` enum('open','accepted','rejected','expired','cancelled') NOT NULL DEFAULT 'open';

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { appRouter } from "./routers";
-import { COOKIE_NAME } from "../shared/const";
-import type { TrpcContext } from "./_core/context";
+import { PACE_SESSION_COOKIE, type TrpcContext } from "./_core/context";
 
 type CookieCall = {
   name: string;
@@ -29,7 +28,9 @@ function createAuthContext(): { ctx: TrpcContext; clearedCookies: CookieCall[] }
     user,
     req: {
       protocol: "https",
+      hostname: "preview.internal",
       headers: {},
+      get: (name: string) => name.toLowerCase() === "x-forwarded-proto" ? "https" : undefined,
     } as TrpcContext["req"],
     res: {
       clearCookie: (name: string, options: Record<string, unknown>) => {
@@ -50,9 +51,9 @@ describe("auth.logout", () => {
 
     expect(result).toEqual({ success: true });
     expect(clearedCookies).toHaveLength(1);
-    expect(clearedCookies[0]?.name).toBe(COOKIE_NAME);
+    expect(clearedCookies[0]?.name).toBe(PACE_SESSION_COOKIE);
     expect(clearedCookies[0]?.options).toMatchObject({
-      maxAge: -1,
+      maxAge: 0,
       secure: true,
       sameSite: "none",
       httpOnly: true,

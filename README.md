@@ -1,14 +1,49 @@
 # Pace Arena
 
-React / Express / tRPC / Drizzle starter, adapted from the Sandbox web-db-user template.
+A responsive football-game challenge platform for eFootball/PES and EA Sports FC/FIFA. The initial environment is Kenya. All wallet balances are **simulated demo credits with no monetary value**: no purchases, deposits, withdrawals, cash prizes, cash-out or payments are implemented. The site is independent and is not affiliated with game publishers.
 
-- `pnpm dev`: development server; honors `PORT` (default 3000).
-- `pnpm build` / `pnpm start`: build and serve `dist/index.js` and `dist/public/`.
-- `pnpm db:migrate`: apply checked-in migrations. `pnpm db:push`: generate and apply new schema changes.
-- `pnpm check` / `pnpm test`: types and application tests.
+After email verification, each unique verified email account receives a one-time, idempotent grant of 1,000 demo credits, recorded in the wallet ledger. Duplicate emails are rejected and the grant is tied to the account. The demo is rate-limited and not Sybil-proof across unrelated email addresses; it does not collect phone numbers, device fingerprints or precise location to try to link separate accounts.
 
-Start with the Webdev skill's default-template guide. Platform login, storage, payments and service contracts live in its shared references; read the relevant capability before extending its helper.
+## Stack and development
 
-`server/_core/publicConfig.ts` exposes only named public runtime values. Private keys stay server-side. The platform serves managed `/manus-storage/` assets; the application does not register a second proxy.
+This project uses React/Vite, Wouter, typed tRPC, Express, Drizzle and the Manus-managed MySQL-compatible database. Node, pnpm and dependencies are pinned in the repository. The development server listens on `PORT` (default `3000`).
 
-Platform configuration is readable and editable through `webdev.config`. Default settings are initial values, not enforced constraints. The agent may modify the files, commands and configuration or follow the flexible guide for another stack.
+```sh
+pnpm install --frozen-lockfile
+pnpm db:migrate
+pnpm dev
+```
+
+The development and published deployments use the same managed database. Treat migrations and all development writes as production data changes. Only apply checked-in additive migrations; do not use sample users, hidden mock wallets or destructive acceptance testing against this database.
+
+## Configuration
+
+Copy `.env.example` for a separately hosted local environment. In the managed project, use protected project configuration for `PACE_SMTP_URL`, `PACE_SMTP_FROM` and `PACE_ADMIN_EMAILS`; do not commit or print their values. The platform injects `DATABASE_URL`, `MANUS_API_URL`, `MANUS_API_KEY`, the project identity and the signed-cookie secret. Keep these server-side.
+
+- `DATABASE_URL`: managed MySQL-compatible connection string (provided by the project for development and production).
+- `PACE_SMTP_URL`: SMTP connection for verification and one-use password-reset messages. Supply a provider-backed mailbox and use an approved sender.
+- `PACE_SMTP_FROM`: sender address/name that your SMTP provider authorizes.
+- `PACE_ADMIN_EMAILS`: comma-separated trusted admin addresses. The backend promotes a matching account only after its email is verified; a normal user cannot edit their own role.
+- `PORT`: server listening port; defaults to 3000.
+
+If SMTP is unavailable, account email verification and password reset cannot deliver links; do not advertise those flows as operational until mail delivery has been configured and checked. Never paste credentials into source, chat, build-time frontend variables, or screenshots.
+
+## Migrations and persistent data
+
+`drizzle/schema.ts` is the source schema; `drizzle/*.sql` and `drizzle/meta/_journal.json` are the committed versioned migration history. Apply existing migrations with `pnpm db:migrate`. After intentional schema edits, generate and inspect a new migration, then apply it with the project migration command. Database and migration state persist across deploys, and development shares them with production. Before any manual/export operation, take a separately stored encrypted backup using an authorized MySQL client and rehearse restoration outside the live application. The managed platform does not provide a separate dev database or a built-in database backup/restore API.
+
+## Authentication, privacy and evidence
+
+Pace Arena uses verified email/password credentials and opaque server sessions in the `pace_arena_session` cookie. Public HTTPS Preview traffic uses `SameSite=None; Secure` based on the forwarded public protocol; local plain-HTTP handling is separate. Normal player, match-participant and administrator authorization is checked on the backend. The browser receives no database or SMTP credential and cannot submit a role, resulting balance, or trusted match time.
+
+The managed MySQL service does **not** provide native row-level-security policies. Data access is therefore guarded in the application server with user-scoped relationship checks, locked transactions and role middleware. The managed object store does not offer per-object ACLs either: screenshots are encrypted with AES-256-GCM, object keys remain server-side, metadata ties each object to an authorized match, and media is streamed only through authenticated participant/admin routes with `private, no-store` responses. Screenshots and user-entered scores are evidence—not independently authenticated game results. No transfer occurs when evidence conflicts or is missing; those cases require review.
+
+## Routes, health and production
+
+The client route list is maintained in `client/public/manus-routes.json` and must match `client/src/App.tsx`. Unknown paths render the not-found page; the Express server serves the SPA entry for application pages and `/api/health` is the unauthenticated readiness endpoint. Run `pnpm check`, `pnpm test` and `pnpm build` before a checkpoint. Production start is `pnpm start`; the listener honors `PORT`. The checked-in `Dockerfile` builds the frontend and server for the managed container deployment. A checkpoint is a saved commit on the project's canonical `main` branch; checkpointing and publishing are separate actions.
+
+## Product boundaries
+
+Administrators can pause **new** challenges, adjust the minimum/maximum permitted stake within the database-enforced 10–5,000 demo-credit ceiling, set a default match duration within 6–30 minutes, and post a short operational notice. Changes require a reason, are auditable, apply only to new challenges, and never change already agreed match terms. Real-money settings do not exist.
+
+The application uses same-named game editions and specific platforms for matchmaking; it does not assume mobile/PC/PlayStation/Xbox cross-play compatibility. In-app notifications are persistent but are not browser push or guaranteed realtime. Timeout work runs in the application server and always rechecks the database state before taking action. Before any real-money feature in Kenya, obtain independent legal advice on regulatory classification/licensing and confirm selected payment-provider approval; this project makes no such licensing or compliance claim.
