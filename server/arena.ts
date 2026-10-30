@@ -34,6 +34,7 @@ import {
   validateScorePair,
 } from "../shared/pace";
 import { getDb } from "./db";
+import { canViewChallengeDetails } from "./challenge-access";
 import { adminProcedure, protectedProcedure, router } from "./_core/trpc";
 import { storePrivateEvidence } from "./evidence";
 
@@ -437,7 +438,7 @@ export const arenaRouter = router({
       const rows = await db.select({ challenge: challenges, creatorProfile: profiles, creator: users }).from(challenges).innerJoin(profiles, eq(profiles.userId, challenges.creatorId)).innerJoin(users, eq(users.id, challenges.creatorId)).where(eq(challenges.id, input.id)).limit(1);
       const row = rows[0];
       if (!row) notFound();
-      if (row.challenge.creatorId !== ctx.user.id && row.challenge.opponentId !== ctx.user.id) forbidden();
+      if (!canViewChallengeDetails(row.challenge, ctx.user.id)) forbidden();
       const { creatorId, opponentId, ...publicChallenge } = row.challenge;
       const [inviteeProfile] = opponentId ? await db.select({ username: profiles.username }).from(profiles).where(eq(profiles.userId, opponentId)).limit(1) : [];
       return { ...publicChallenge, isOwner: creatorId === ctx.user.id, isDirectInvitation: opponentId !== null, isInvitationForYou: opponentId === ctx.user.id && row.challenge.status === "open", inviteTarget: inviteeProfile?.username ?? null, creator: { username: row.creatorProfile.username, avatarColor: row.creatorProfile.avatarColor, availability: row.creatorProfile.availability } };
