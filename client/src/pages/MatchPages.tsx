@@ -34,21 +34,22 @@ function MatchRoom({ id, evidenceOnly }: { id: number; evidenceOnly: boolean }) 
   const saveCode = trpc.arena.matches.saveCode.useMutation({ onSuccess: async () => { setCode(""); toast.success("Private room code shared with your opponent."); await utils.arena.matches.details.invalidate(); }, onError: error => toast.error(error.message) });
   const finish = trpc.arena.matches.finish.useMutation({ onSuccess: async () => { toast.success("Five-minute evidence window started."); await utils.arena.matches.details.invalidate(); if (!evidenceOnly) setLocation(`/matches/${id}/evidence`); }, onError: error => toast.error(error.message) });
   const [code, setCode] = useState("");
-  if (query.isLoading) return <LoadingRows count={3} />;
-  if (query.isError || !query.data) return <ErrorNotice message={query.error?.message ?? "Match room could not be loaded."} onRetry={() => query.refetch()} />;
   const match = query.data;
-  const me = match.participants.find(person => person.isMe);
-  const currentReady = Boolean(me?.readyAt);
-  const myCode = match.codes.find(item => item.isMine);
-  const countdownTarget = match.status === "AWAITING_EVIDENCE" ? match.evidenceDeadline : match.status === "IN_PROGRESS" ? match.expectedEndAt : match.readyDeadline;
+  const countdownTarget = match ? (match.status === "AWAITING_EVIDENCE" ? match.evidenceDeadline : match.status === "IN_PROGRESS" ? match.expectedEndAt : match.readyDeadline) : null;
   const countdown = useCountdown(countdownTarget);
-  const myEvidence = match.evidence.find(item => item.isMine);
-  const terminal = ["COMPLETED", "DRAWN", "CANCELLED", "REFUNDED"].includes(match.status);
   const submitScore = trpc.arena.matches.submitEvidence.useMutation({ onSuccess: async result => { toast.success(result.status === "UNDER_REVIEW" ? "Score reports conflict. Settlement is frozen for review." : "Score evidence submitted."); await Promise.all([utils.arena.matches.details.invalidate(), utils.arena.wallet.summary.invalidate()]); }, onError: error => toast.error(error.message) });
   const [file, setFile] = useState<File | null>(null);
   const [scoreFor, setScoreFor] = useState("0");
   const [scoreAgainst, setScoreAgainst] = useState("0");
   const [comments, setComments] = useState("");
+  // Keep every hook above these query-state returns so async data never changes hook order.
+  if (query.isLoading) return <LoadingRows count={3} />;
+  if (query.isError || !match) return <ErrorNotice message={query.error?.message ?? "Match room could not be loaded."} onRetry={() => query.refetch()} />;
+  const me = match.participants.find(person => person.isMe);
+  const currentReady = Boolean(me?.readyAt);
+  const myCode = match.codes.find(item => item.isMine);
+  const myEvidence = match.evidence.find(item => item.isMine);
+  const terminal = ["COMPLETED", "DRAWN", "CANCELLED", "REFUNDED"].includes(match.status);
   const submitEvidence = async (event: FormEvent) => {
     event.preventDefault();
     if (!file) { toast.error("Choose the final-score screenshot first."); return; }

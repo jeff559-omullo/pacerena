@@ -31,6 +31,7 @@
 ## Match room, readiness, and lifecycle — in progress
 - [ ] After acceptance and successful reservation of both demo stakes, create a private match room displaying usernames/avatars, game/edition/platforms, agreed settings, each player's readiness, private in-game codes, instructions, countdown/elapsed time, current status, evidence deadline and report-problem action.
 - [ ] Restrict codes to authorized participants; never show them in public listings. Require both participants to confirm readiness; start timer only after backend validation when both are ready. Handle non-readiness with configured timeout/cancellation rules. Derive countdowns from server timestamps, browser is display only.
+- [x] Keep MatchRoom's React hooks in a consistent order while match data transitions through loading, error and loaded states, so opening `/matches/:id` does not crash with “Rendered more hooks than during the previous render”; retain countdown and evidence controls after data loads.
 - [ ] Implement explicit validated states DRAFT, OPEN, ACCEPTED, AWAITING_STAKES, READY, IN_PROGRESS, AWAITING_EVIDENCE, UNDER_REVIEW, COMPLETED, DRAWN, CANCELLED, REFUNDED. Do not permit arbitrary frontend state changes. Record creation/acceptance/reservation/readiness/start/expected end/reported end/evidence deadline/settlement times and cancellation/dispute reasons. Enforce trusted server timeouts.
 
 ## Evidence, five-minute deadline, and settlement — in progress
