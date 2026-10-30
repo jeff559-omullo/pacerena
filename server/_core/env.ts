@@ -10,6 +10,8 @@ export const ENV = {
   get forgeApiUrl() { return process.env.MANUS_API_URL ?? ""; },
   get forgeApiKey() { return process.env.MANUS_API_KEY ?? ""; },
   get paceSmtpUrl() { return process.env.PACE_SMTP_URL ?? ""; },
+  get paceSmtpUsername() { return process.env.PACE_SMTP_USERNAME ?? ""; },
+  get paceSmtpAppPassword() { return process.env.PACE_SMTP_APP_PASSWORD ?? ""; },
   get paceSmtpFrom() { return process.env.PACE_SMTP_FROM ?? ""; },
   get paceAdminEmails() { return process.env.PACE_ADMIN_EMAILS ?? ""; },
 };

@@ -18,10 +18,11 @@ The development and published deployments use the same managed database. Treat m
 
 ## Configuration
 
-Copy `.env.example` for a separately hosted local environment. In the managed project, use protected project configuration for `PACE_SMTP_URL`, `PACE_SMTP_FROM` and `PACE_ADMIN_EMAILS`; do not commit or print their values. The platform injects `DATABASE_URL`, `MANUS_API_URL`, `MANUS_API_KEY`, the project identity and the signed-cookie secret. Keep these server-side.
+Copy `.env.example` for a separately hosted local environment. In the managed project, use protected project configuration for `PACE_SMTP_USERNAME`, `PACE_SMTP_APP_PASSWORD`, `PACE_SMTP_FROM`, the optional generic `PACE_SMTP_URL` fallback and `PACE_ADMIN_EMAILS`; do not commit or print their values. The platform injects `DATABASE_URL`, `MANUS_API_URL`, `MANUS_API_KEY`, the project identity and the signed-cookie secret. Keep these server-side.
 
 - `DATABASE_URL`: managed MySQL-compatible connection string (provided by the project for development and production).
-- `PACE_SMTP_URL`: SMTP connection for verification and one-use password-reset messages. Supply a provider-backed mailbox and use an approved sender.
+- `PACE_SMTP_USERNAME` and `PACE_SMTP_APP_PASSWORD`: preferred Gmail setup; the server enforces TLS on `smtp.gmail.com:587` and removes grouping spaces from Google's generated App Password. Use an App Password, never a normal Google account password.
+- `PACE_SMTP_URL`: optional credentialed `smtp://` or `smtps://` fallback for non-Gmail providers, used only when the Gmail username/password pair is unset.
 - `PACE_SMTP_FROM`: sender address/name that your SMTP provider authorizes.
 - `PACE_ADMIN_EMAILS`: comma-separated trusted admin addresses. The backend promotes a matching account only after its email is verified; a normal user cannot edit their own role.
 - `PORT`: server listening port; defaults to 3000.
