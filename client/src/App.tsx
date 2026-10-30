@@ -40,7 +40,7 @@ function AdminRoute() {
     if (!session.isLoading && !session.data) setLocation("/login");
   }, [session.data, session.isLoading, setLocation]);
   if (session.isLoading || session.isError || !session.data) return <LoadingScreen />;
-  if (session.data.role !== "admin") return <AppShell><section className="card access-denied"><span className="eyebrow">Restricted area</span><h1>Admin access only</h1><p>Your account does not have administrator authorization. Role changes are controlled by trusted server configuration.</p></section></AppShell>;
+  if (session.data.role !== "admin") return <AppShell><section className="card access-denied"><span className="eyebrow">Restricted area</span><h1>Admin access only</h1><p>Your account does not have administrator authorization. Existing administrators control role changes through a reason-recorded, audited server action.</p></section></AppShell>;
   return <AppShell admin>{<AdminPages />}</AppShell>;
 }
 
@@ -49,7 +49,6 @@ function Router() {
     <Route path="/" component={Home} />
     <Route path="/register">{() => <AuthPage mode="register" />}</Route>
     <Route path="/login">{() => <AuthPage mode="login" />}</Route>
-    <Route path="/verify-email">{() => <AuthPage mode="verify" />}</Route>
     <Route path="/reset-password">{() => <AuthPage mode="reset" />}</Route>
     <Route path="/forgot-password">{() => <AuthPage mode="forgot" />}</Route>
     <Route path="/dashboard">{() => <PlayerRoute><Dashboard /></PlayerRoute>}</Route>

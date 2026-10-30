@@ -32,13 +32,6 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   }
   values.lastSignedIn = user.lastSignedIn ?? new Date();
   updateSet.lastSignedIn = values.lastSignedIn;
-  if (user.role !== undefined) {
-    values.role = user.role;
-    updateSet.role = user.role;
-  } else if (user.openId === ENV.ownerOpenId) {
-    values.role = "admin";
-    updateSet.role = "admin";
-  }
   await database.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
 }
 
@@ -62,7 +55,6 @@ export async function getUserByAppSessionHash(tokenHash: string) {
       eq(authSessions.tokenHash, tokenHash),
       isNull(authSessions.revokedAt),
       gt(authSessions.expiresAt, new Date()),
-      gt(emailAccounts.emailVerifiedAt, new Date(0)),
       ne(profiles.eligibility, "suspended"),
     ))
     .limit(1);

@@ -795,6 +795,25 @@ export const arenaRouter = router({
       });
       return { success: true };
     }),
+    setRole: adminProcedure.input(z.object({ userId: z.number().int().positive(), role: z.enum(["user", "admin"]), reason: z.string().trim().min(10).max(2000) })).mutation(async ({ ctx, input }) => {
+      limitUserAction(ctx, "admin_role", 20);
+      if (input.userId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot change your own administrator role." });
+      const db = await database();
+      return db.transaction(async tx => {
+        const targetRows = await tx.select().from(users).where(eq(users.id, input.userId)).for("update").limit(1);
+        const target = targetRows[0];
+        if (!target) notFound();
+        if (target.role === input.role) return { success: true, changed: false };
+        if (target.role === "admin" && input.role === "user") {
+          const administrators = await tx.select({ id: users.id }).from(users).where(eq(users.role, "admin")).orderBy(users.id).for("update");
+          if (administrators.length <= 1) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The final administrator cannot be removed." });
+        }
+        await tx.update(users).set({ role: input.role }).where(eq(users.id, target.id));
+        await tx.insert(adminAuditLogs).values({ adminUserId: ctx.user.id, action: input.role === "admin" ? "grant_administrator_role" : "revoke_administrator_role", entityType: "user", entityId: target.id, reason: input.reason, details: JSON.stringify({ from: target.role, to: input.role }) });
+        await notify(tx, target.id, "account_role_changed", "Account role updated", `An administrator changed your Pace Arena role to ${input.role}.`, "user", target.id);
+        return { success: true, changed: true };
+      });
+    }),
     matchLedger: adminProcedure.input(z.object({ matchId: z.number().int().positive() })).query(async ({ input }) => {
       const db = await database();
       return db.select({ username: profiles.username, transaction: walletTransactions }).from(walletTransactions).innerJoin(profiles, eq(profiles.userId, walletTransactions.userId)).where(eq(walletTransactions.matchId, input.matchId)).orderBy(desc(walletTransactions.createdAt));

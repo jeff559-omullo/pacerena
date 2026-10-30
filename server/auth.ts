@@ -3,7 +3,7 @@ import { randomBytes, createHash, scrypt as scryptCallback, timingSafeEqual } fr
 import { promisify } from "node:util";
 import nodemailer from "nodemailer";
 import { z } from "zod";
-import { and, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
 import { authSessions, emailAccounts, profiles, users, walletAccounts, walletTransactions } from "../drizzle/schema";
 import { normalizeEmail, STARTER_CREDITS } from "../shared/pace";
 import * as dbHelpers from "./db";
@@ -14,7 +14,6 @@ import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 
 const scrypt = promisify(scryptCallback) as (password: string, salt: Buffer, keylen: number) => Promise<Buffer>;
 const SESSION_MS = 14 * 24 * 60 * 60 * 1000;
-const VERIFY_MS = 24 * 60 * 60 * 1000;
 const RESET_MS = 30 * 60 * 1000;
 const AUTH_RATE_LIMIT = 12;
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
@@ -72,9 +71,6 @@ export function safeOrigin(ctx: { req: { get(name: string): string | undefined }
   } catch {
     throw new TRPCError({ code: "BAD_REQUEST", message: "The browser origin could not be verified." });
   }
-}
-function adminEmails(): Set<string> {
-  return new Set(ENV.paceAdminEmails.split(",").map(normalizeEmail).filter(Boolean));
 }
 async function hashPassword(password: string) {
   const salt = randomBytes(16);
@@ -158,7 +154,7 @@ async function mailer() {
     try { transportOptions = gmailSmtpTransportOptions(gmailUsername, gmailPassword); }
     catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Gmail mail settings require a Gmail address and a valid Google App Password." }); }
   } else {
-    if (!connection) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Account email is not configured yet. Set a valid server SMTP connection before registration." });
+    if (!connection) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Password-reset email is not configured. Contact the site administrator if you need to recover an account." });
     try { transportOptions = smtpTransportOptions(connection); }
     catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Mail configuration is invalid. Configure Gmail credentials or a valid credentialed smtp:// or smtps:// connection." }); }
   }
@@ -173,22 +169,19 @@ async function mailer() {
   if (!from) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Set PACE_SMTP_FROM to an address verified with the SMTP provider." });
   return { transport, from };
 }
-async function sendLink(email: string, link: string, kind: "verify" | "reset") {
+async function sendLink(email: string, link: string) {
   const { transport, from } = await mailer();
-  const subject = kind === "verify" ? "Verify your Pace Arena account" : "Reset your Pace Arena password";
-  const action = kind === "verify" ? "Verify your email address" : "Choose a new password";
-  const expiry = kind === "verify" ? "24 hours" : "30 minutes";
   await transport.sendMail({
     from,
     to: email,
-    subject,
-    text: `${action}: ${link}\n\nThis link expires in ${expiry}. If you did not request this, ignore this message. Demo credits have no monetary value.`,
-    html: `<p>${action}:</p><p><a href="${link}">${action}</a></p><p>This link expires in ${expiry}. If you did not request this, ignore this message. Demo credits have no monetary value.</p>`,
+    subject: "Reset your Pace Arena password",
+    text: `Choose a new password: ${link}\n\nThis link expires in 30 minutes. If you did not request this, ignore this message. Demo credits have no monetary value.`,
+    html: `<p>Choose a new password:</p><p><a href="${link}">Choose a new password</a></p><p>This link expires in 30 minutes. If you did not request this, ignore this message. Demo credits have no monetary value.</p>`,
   });
 }
-async function safeSendLink(email: string, link: string, kind: "verify" | "reset") {
+async function safeSendLink(email: string, link: string) {
   try {
-    await sendLink(email, link, kind);
+    await sendLink(email, link);
   } catch (error) {
     const code = error instanceof TRPCError ? error.code : (error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "UNKNOWN");
     console.error("[Pace Arena mail] Delivery failed (redacted code):", code);
@@ -210,7 +203,7 @@ async function grantStarterCredits(tx: any, userId: number) {
     reservedAfter: 0,
     status: "completed",
     idempotencyKey: `starter:${userId}`,
-    reason: "One-time initial demo-credit grant after email verification.",
+    reason: "One-time initial demo-credit grant at account creation.",
   });
 }
 const emailSchema = z.string().trim().email().max(320).transform(normalizeEmail);
@@ -221,31 +214,31 @@ export const authRouter = router({
   me: publicProcedure.query(({ ctx }) => ctx.user),
   register: publicProcedure.input(z.object({ email: emailSchema, password: passwordSchema, username: usernameSchema })).mutation(async ({ ctx, input }) => {
     rateLimit(ctx, "register");
-    const origin = safeOrigin(ctx);
+    safeOrigin(ctx);
     const database = await requireDatabase();
     const email = input.email;
-    const token = randomBytes(32).toString("base64url");
     const openId = keyFor(email);
-    const isAdmin = adminEmails().has(email);
+    const sessionToken = randomBytes(32).toString("base64url");
+    let userId: number;
     try {
-      await database.transaction(async tx => {
+      userId = await database.transaction(async tx => {
         const userInsert = await tx.insert(users).values({
           openId,
           name: input.username,
           email,
           loginMethod: "email_password",
-          ...(isAdmin ? { role: "admin" as const } : {}),
         });
-        const userId = Number((userInsert as unknown as [{ insertId: number }])[0]?.insertId);
-        if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("Could not create account identity");
+        const createdUserId = Number((userInsert as unknown as [{ insertId: number }])[0]?.insertId);
+        if (!Number.isSafeInteger(createdUserId) || createdUserId <= 0) throw new Error("Could not create account identity");
         await tx.insert(emailAccounts).values({
-          userId,
+          userId: createdUserId,
           emailNormalized: email,
           passwordHash: await hashPassword(input.password),
-          verifyTokenHash: digest(token),
-          verifyExpiresAt: new Date(Date.now() + VERIFY_MS),
         });
-        await tx.insert(profiles).values({ userId, username: input.username, country: "KE", availability: "away", eligibility: "eligible" });
+        await tx.insert(profiles).values({ userId: createdUserId, username: input.username, country: "KE", availability: "away", eligibility: "eligible" });
+        await grantStarterCredits(tx, createdUserId);
+        await tx.insert(authSessions).values({ userId: createdUserId, tokenHash: digest(sessionToken), expiresAt: new Date(Date.now() + SESSION_MS), lastUsedAt: new Date() });
+        return createdUserId;
       });
     } catch (error) {
       if (String(error).includes("Duplicate entry") || String(error).includes("ER_DUP_ENTRY")) {
@@ -253,10 +246,10 @@ export const authRouter = router({
       }
       throw error;
     }
-    const verificationUrl = new URL("/verify-email", origin);
-    verificationUrl.searchParams.set("token", token);
-    await safeSendLink(email, verificationUrl.toString(), "verify");
-    return { message: "Check your inbox to verify your email. Your demo balance is a one-time 1,000-credit grant." };
+    const user = await dbHelpers.getUserById(userId);
+    if (!user) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "The account was created, but its session could not be loaded. Please sign in." });
+    setSessionCookie(ctx, sessionToken);
+    return user;
   }),
   login: publicProcedure.input(z.object({ email: emailSchema, password: z.string().min(1).max(128) })).mutation(async ({ ctx, input }) => {
     rateLimit(ctx, "login");
@@ -269,51 +262,25 @@ export const authRouter = router({
       await database.update(emailAccounts).set({ failedLoginCount: failures, lockedUntil: failures >= 10 ? new Date(Date.now() + 15 * 60_000) : null }).where(eq(emailAccounts.userId, account.userId));
       throw new TRPCError({ code: "UNAUTHORIZED", message: "Email or password is incorrect." });
     }
-    if (!account.emailVerifiedAt) {
-      const token = randomBytes(32).toString("base64url");
-      await database.update(emailAccounts).set({ verifyTokenHash: digest(token), verifyExpiresAt: new Date(Date.now() + VERIFY_MS) }).where(eq(emailAccounts.userId, account.userId));
-      const user = await dbHelpers.getUserById(account.userId);
-      if (user) {
-        const origin = safeOrigin(ctx);
-        const link = new URL("/verify-email", origin);
-        link.searchParams.set("token", token);
-        await safeSendLink(input.email, link.toString(), "verify");
-      }
-      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Verify your email first. We sent a fresh verification link." });
-    }
     await database.update(emailAccounts).set({ failedLoginCount: 0, lockedUntil: null }).where(eq(emailAccounts.userId, account.userId));
-    if (adminEmails().has(input.email)) await database.update(users).set({ role: "admin" }).where(eq(users.id, account.userId));
+    await database.transaction(async tx => grantStarterCredits(tx, account.userId));
     await createSession(ctx, account.userId);
     const user = await dbHelpers.getUserById(account.userId);
     return user;
-  }),
-  verifyEmail: publicProcedure.input(z.object({ token: z.string().min(40).max(100) })).mutation(async ({ ctx, input }) => {
-    rateLimit(ctx, "verify");
-    const database = await requireDatabase();
-    const userId = await database.transaction(async tx => {
-      const rows = await tx.select().from(emailAccounts).where(and(eq(emailAccounts.verifyTokenHash, digest(input.token)), gt(emailAccounts.verifyExpiresAt, new Date()))).for("update").limit(1);
-      const account = rows[0];
-      if (!account) throw new TRPCError({ code: "BAD_REQUEST", message: "This verification link is invalid or expired. Request a fresh link by signing in." });
-      await tx.update(emailAccounts).set({ emailVerifiedAt: new Date(), verifyTokenHash: null, verifyExpiresAt: null }).where(eq(emailAccounts.userId, account.userId));
-      await grantStarterCredits(tx, account.userId);
-      return account.userId;
-    });
-    await createSession(ctx, userId);
-    return { success: true };
   }),
   forgotPassword: publicProcedure.input(z.object({ email: emailSchema })).mutation(async ({ ctx, input }) => {
     rateLimit(ctx, "forgot");
     const origin = safeOrigin(ctx);
     const account = await dbHelpers.getEmailAccount(input.email);
-    if (account?.emailVerifiedAt) {
+    if (account) {
       const token = randomBytes(32).toString("base64url");
       const database = await requireDatabase();
       await database.update(emailAccounts).set({ resetTokenHash: digest(token), resetExpiresAt: new Date(Date.now() + RESET_MS) }).where(eq(emailAccounts.userId, account.userId));
       const url = new URL("/reset-password", origin);
       url.searchParams.set("token", token);
-      await safeSendLink(input.email, url.toString(), "reset");
+      await safeSendLink(input.email, url.toString());
     }
-    return { message: "If an eligible account exists, password-reset instructions have been sent." };
+    return { message: "If an account exists, password-reset instructions have been sent." };
   }),
   resetPassword: publicProcedure.input(z.object({ token: z.string().min(40).max(100), password: passwordSchema })).mutation(async ({ ctx, input }) => {
     rateLimit(ctx, "reset");
@@ -336,20 +303,6 @@ export const authRouter = router({
     }
     ctx.res.clearCookie(PACE_SESSION_COOKIE, { ...getSessionCookieOptions(ctx.req), maxAge: 0 });
     return { success: true } as const;
-  }),
-  resendVerification: publicProcedure.input(z.object({ email: emailSchema })).mutation(async ({ ctx, input }) => {
-    rateLimit(ctx, "resend");
-    const origin = safeOrigin(ctx);
-    const account = await dbHelpers.getEmailAccount(input.email);
-    if (account && !account.emailVerifiedAt) {
-      const token = randomBytes(32).toString("base64url");
-      const database = await requireDatabase();
-      await database.update(emailAccounts).set({ verifyTokenHash: digest(token), verifyExpiresAt: new Date(Date.now() + VERIFY_MS) }).where(eq(emailAccounts.userId, account.userId));
-      const url = new URL("/verify-email", origin);
-      url.searchParams.set("token", token);
-      await safeSendLink(input.email, url.toString(), "verify");
-    }
-    return { message: "If the account needs verification, a fresh link has been sent." };
   }),
   session: protectedProcedure.query(async ({ ctx }) => {
     const db = await requireDatabase();

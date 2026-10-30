@@ -2,7 +2,7 @@
 
 A responsive football-game challenge platform for eFootball/PES and EA Sports FC/FIFA. The initial environment is Kenya. All wallet balances are **simulated demo credits with no monetary value**: no purchases, deposits, withdrawals, cash prizes, cash-out or payments are implemented. The site is independent and is not affiliated with game publishers.
 
-After email verification, each unique verified email account receives a one-time, idempotent grant of 1,000 demo credits, recorded in the wallet ledger. Duplicate emails are rejected and the grant is tied to the account. The demo is rate-limited and not Sybil-proof across unrelated email addresses; it does not collect phone numbers, device fingerprints or precise location to try to link separate accounts.
+Email verification is not required. Registration creates the account, session and one-time, idempotent grant of 1,000 demo credits, recorded in the wallet ledger. Duplicate email addresses and usernames are rejected and the grant is tied to the account. The demo is rate-limited and not Sybil-proof across unrelated email addresses; it does not collect phone numbers, device fingerprints or precise location to try to link separate accounts. Because inbox ownership is not checked, do not use email address alone as proof of identity or to grant administrator privileges.
 
 ## Stack and development
 
@@ -18,16 +18,17 @@ The development and published deployments use the same managed database. Treat m
 
 ## Configuration
 
-Copy `.env.example` for a separately hosted local environment. In the managed project, use protected project configuration for `PACE_SMTP_USERNAME`, `PACE_SMTP_APP_PASSWORD`, `PACE_SMTP_FROM`, the optional generic `PACE_SMTP_URL` fallback and `PACE_ADMIN_EMAILS`; do not commit or print their values. The platform injects `DATABASE_URL`, `MANUS_API_URL`, `MANUS_API_KEY`, the project identity and the signed-cookie secret. Keep these server-side.
+Copy `.env.example` for a separately hosted local environment. In the managed project, use protected project configuration for `PACE_SMTP_USERNAME`, `PACE_SMTP_APP_PASSWORD`, `PACE_SMTP_FROM` and the optional generic `PACE_SMTP_URL` fallback; do not commit or print their values. The platform injects `DATABASE_URL`, `MANUS_API_URL`, `MANUS_API_KEY`, the project identity and the signed-cookie secret. Keep these server-side.
 
 - `DATABASE_URL`: managed MySQL-compatible connection string (provided by the project for development and production).
 - `PACE_SMTP_USERNAME` and `PACE_SMTP_APP_PASSWORD`: preferred Gmail setup; the server enforces TLS on `smtp.gmail.com:587` and removes grouping spaces from Google's generated App Password. Use an App Password, never a normal Google account password.
 - `PACE_SMTP_URL`: optional credentialed `smtp://` or `smtps://` fallback for non-Gmail providers, used only when the Gmail username/password pair is unset.
 - `PACE_SMTP_FROM`: sender address/name that your SMTP provider authorizes.
-- `PACE_ADMIN_EMAILS`: comma-separated trusted admin addresses. The backend promotes a matching account only after its email is verified; a normal user cannot edit their own role.
 - `PORT`: server listening port; defaults to 3000.
 
-If SMTP is unavailable, account email verification and password reset cannot deliver links; do not advertise those flows as operational until mail delivery has been configured and checked. Never paste credentials into source, chat, build-time frontend variables, or screenshots.
+SMTP is not used during registration or login. If SMTP is unavailable, password-reset links cannot be delivered until mail is configured and checked. Administrator roles are never granted by email matching: an existing administrator must perform a reason-required role change in the operations desk, and each change is audited. Never paste credentials into source, chat, build-time frontend variables, or screenshots.
+
+For a fresh database with no administrator, a trusted database operator must provision the first admin role once; after that, use the audited role controls in the operations desk. Email addresses and identity-provider upserts never bootstrap administrator access.
 
 ## Migrations and persistent data
 
@@ -35,7 +36,7 @@ If SMTP is unavailable, account email verification and password reset cannot del
 
 ## Authentication, privacy and evidence
 
-Pace Arena uses verified email/password credentials and opaque server sessions in the `pace_arena_session` cookie. Public HTTPS Preview traffic uses `SameSite=None; Secure` based on the forwarded public protocol; local plain-HTTP handling is separate. Normal player, match-participant and administrator authorization is checked on the backend. The browser receives no database or SMTP credential and cannot submit a role, resulting balance, or trusted match time.
+Pace Arena uses email/password credentials without an email-verification step and opaque server sessions in the `pace_arena_session` cookie. Successful registration signs the player in immediately. Public HTTPS Preview traffic uses `SameSite=None; Secure` based on the forwarded public protocol; local plain-HTTP handling is separate. Normal player, match-participant and administrator authorization is checked on the backend. The browser receives no database or SMTP credential and cannot submit a role, resulting balance, or trusted match time. Since signup does not verify inbox ownership, each player must protect their password; password recovery still depends on receiving email.
 
 The managed MySQL service does **not** provide native row-level-security policies. Data access is therefore guarded in the application server with user-scoped relationship checks, locked transactions and role middleware. The managed object store does not offer per-object ACLs either: screenshots are encrypted with AES-256-GCM, object keys remain server-side, metadata ties each object to an authorized match, and media is streamed only through authenticated participant/admin routes with `private, no-store` responses. Screenshots and user-entered scores are evidence—not independently authenticated game results. No transfer occurs when evidence conflicts or is missing; those cases require review.
 
