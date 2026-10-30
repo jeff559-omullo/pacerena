@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useLocation } from "wouter";
 import { ArrowRight, Clock3, Gamepad2, Plus, ShieldCheck, Swords, UsersRound } from "lucide-react";
 import { toast } from "sonner";
@@ -59,8 +59,10 @@ function ChallengeList() {
 function CreateChallenge() {
   const [, setLocation] = useLocation();
   const wallet = trpc.arena.wallet.summary.useQuery();
+  const profile = trpc.arena.profile.me.useQuery(undefined, { retry: false });
   const rules = trpc.arena.settings.rules.useQuery();
   const utils = trpc.useUtils();
+  const profilePrefilled = useRef(false);
   const [game, setGame] = useState<"efootball" | "ea_fc">("efootball");
   const [edition, setEdition] = useState("");
   const [platform, setPlatform] = useState<keyof typeof PLATFORM_LABELS>("ps5");
@@ -70,10 +72,19 @@ function CreateChallenge() {
   const [description, setDescription] = useState("");
   const [settings, setSettings] = useState("Online friendly · default squads");
   const [inviteUsername, setInviteUsername] = useState("");
+  useEffect(() => {
+    if (!profile.data || profilePrefilled.current) return;
+    profilePrefilled.current = true;
+    if (profile.data.preferredGame) setGame(profile.data.preferredGame);
+    if (profile.data.gameEdition) setEdition(profile.data.gameEdition);
+    if (profile.data.platform) setPlatform(profile.data.platform);
+  }, [profile.data]);
   const minimumStake = rules.data?.minimumStake ?? STAKE_MIN;
   const maximumStake = rules.data?.maximumStake ?? STAKE_MAX;
   const defaultMinutes = rules.data?.defaultMatchMinutes ?? DEFAULT_MATCH_MINUTES;
   const creationPaused = rules.data?.challengeCreationEnabled === false;
+  const savedProfile = profile.data;
+  const profileMatches = Boolean(savedProfile && savedProfile.eligibility === "eligible" && savedProfile.availability === "available" && savedProfile.preferredGame && savedProfile.gameEdition?.trim() && savedProfile.platform && savedProfile.preferredGame === game && savedProfile.gameEdition.trim().toLowerCase() === edition.trim().toLowerCase() && savedProfile.platform === platform);
   useEffect(() => {
     setStake(current => Math.max(minimumStake, Math.min(maximumStake, current)));
     setMinutes(defaultMinutes);
@@ -97,6 +108,14 @@ function CreateChallenge() {
     {rules.data?.maintenanceNotice && <div className="notice" role="status">{rules.data.maintenanceNotice}</div>}
     {creationPaused && <div className="notice notice-warning" role="status">New challenge creation is paused by an administrator. Existing challenge terms remain unchanged.</div>}
     {rules.isError && <ErrorNotice message="Current challenge rules could not be loaded. Retry before publishing." onRetry={() => rules.refetch()} />}
+    {profile.isLoading && <div className="notice" role="status">Loading your saved player profile…</div>}
+    {profile.isError && <ErrorNotice message="Your player profile could not be checked. Retry before publishing." onRetry={() => profile.refetch()} />}
+    {savedProfile && !profileMatches && <div className="notice notice-warning" role="status">
+      {savedProfile.eligibility !== "eligible" ? <>Your account is not currently eligible to create challenges. <Link href="/settings">Review profile settings</Link>.</>
+        : savedProfile.availability !== "available" ? <>Set your availability to <strong>Open to challenges</strong> in <Link href="/settings">Profile &amp; settings</Link>.</>
+        : !savedProfile.preferredGame || !savedProfile.gameEdition?.trim() || !savedProfile.platform ? <>Complete your preferred game, exact edition, and platform in <Link href="/settings">Profile &amp; settings</Link> before creating a challenge.</>
+        : <>Your challenge must match your saved profile: <strong>{GAME_LABELS[savedProfile.preferredGame]} · {savedProfile.gameEdition} · {PLATFORM_LABELS[savedProfile.platform]}</strong>. Keep those selections or update <Link href="/settings">Profile &amp; settings</Link>.</>}
+    </div>}
     <div className="grid-2"><section className="card"><div className="card-header"><div><h3>Match terms</h3><p>Only compatible players can accept.</p></div><Swords size={17} color="var(--lime)" /></div>
       <form onSubmit={submit}>
         <div className="form-grid">
@@ -111,7 +130,7 @@ function CreateChallenge() {
           <div className="field full"><label htmlFor="invite-username">Invite a specific player (optional)</label><input id="invite-username" className="input" value={inviteUsername} onChange={event => setInviteUsername(event.target.value)} minLength={3} maxLength={24} pattern="[A-Za-z0-9_]+" placeholder="Player username" /><span className="field-help">Only this eligible, available, compatible player can see, accept or decline the invitation. Leave blank for a public open challenge.</span></div>
         </div>
         <div className="notice notice-warning" style={{ marginTop: 17 }}><strong>Stake reservation:</strong> {stake.toLocaleString()} demo credits will move from available to reserved when you publish. No money is involved. Same edition and exact platform only.</div>
-        <div className="form-actions"><Link className="button button-ghost" href="/challenges">Cancel</Link><SpinnerButton type="submit" busy={create.isPending} disabled={creationPaused || rules.isLoading || rules.isError}><Plus size={15} /> Publish challenge</SpinnerButton></div>
+        <div className="form-actions"><Link className="button button-ghost" href="/challenges">Cancel</Link><SpinnerButton type="submit" busy={create.isPending} disabled={creationPaused || rules.isLoading || rules.isError || profile.isLoading || profile.isError || !profileMatches}><Plus size={15} /> Publish challenge</SpinnerButton></div>
       </form>
     </section><aside className="page-stack">
       <div className="card"><div className="card-header"><div><h3>How acceptance works</h3><p>One opponent, one atomic acceptance.</p></div><ShieldCheck size={17} color="var(--lime)" /></div><div className="page-stack"><div className="notice"><strong>1 · Your stake is held.</strong><br />Your published terms remain backed by your available demo balance.</div><div className="notice"><strong>2 · One eligible rival accepts.</strong><br />The backend locks the challenge and reserves their stake in one transaction.</div><div className="notice"><strong>3 · The private room opens.</strong><br />Both players review the same agreed terms before readiness.</div></div></div>
