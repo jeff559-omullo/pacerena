@@ -495,7 +495,7 @@ export const arenaRouter = router({
         settings: data.challenge.settings,
         description: data.challenge.description,
         participants: participants.map(row => ({ side: row.participant.side, stake: row.participant.stake, readyAt: row.participant.readyAt, scoreFor: row.participant.scoreFor, scoreAgainst: row.participant.scoreAgainst, isMe: row.participant.userId === ctx.user.id, ...(isAdmin ? { userId: row.participant.userId } : {}), username: row.username, avatarColor: row.avatarColor, platform: row.platform, game: row.game, edition: row.edition })),
-        codes: codes.map(code => ({ side: participantByUser.get(code.userId)?.participant.side, isMine: code.userId === ctx.user.id, code: code.code, updatedAt: code.updatedAt })),
+        codes: codes.map(code => ({ id: code.id, side: participantByUser.get(code.userId)?.participant.side, isMine: code.userId === ctx.user.id, code: code.code, updatedAt: code.updatedAt })),
         evidence: activeEvidence,
         disputes: disputeRows.map(dispute => ({ id: dispute.id, reason: dispute.reason, explanation: dispute.explanation, status: dispute.status, administrativeNotes: dispute.administrativeNotes, resolutionReason: dispute.resolutionReason, resolvedAt: dispute.resolvedAt, createdAt: dispute.createdAt, isMine: dispute.openedBy === ctx.user.id, attachments: privateAttachments.filter(attachment => attachment.disputeId === dispute.id).map(attachment => ({ id: attachment.id, mimeType: attachment.mimeType, sizeBytes: attachment.sizeBytes, createdAt: attachment.createdAt, url: `/api/dispute-evidence/${attachment.id}` })) })),
         stateHistory: stateHistory.map(event => ({ fromState: event.fromState, toState: event.toState, reason: event.reason, createdAt: event.createdAt })),
