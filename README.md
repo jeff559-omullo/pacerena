@@ -18,7 +18,7 @@ pnpm db:migrate
 pnpm dev
 ```
 
-The development and published deployments use the same managed database. Treat migrations and all development writes as production data changes. Apply checked-in migrations only; do not use sample users, mock wallets, live partner events, payout tests or destructive acceptance testing against this shared database.
+The development and published deployments use the same managed database. Treat migrations and all development writes as production data changes. The production server binds its health endpoint first, reports `503 starting` and blocks API traffic while it applies only pending checked-in journal migrations under a MySQL advisory lock, releases the migration connection, then reports healthy and starts timeout processing. The developer `pnpm dev` command never auto-migrates; use `pnpm db:migrate` deliberately when a shared-schema change is intended. Apply checked-in migrations only; do not use sample users, mock wallets, live partner events, payout tests or destructive acceptance testing against this shared database.
 
 ## Configuration
 
@@ -46,7 +46,7 @@ For a fresh database with no administrator, a trusted database operator must pro
 
 ## Migrations and persistent data
 
-`drizzle/schema.ts` is the source schema; `drizzle/*.sql` and `drizzle/meta/_journal.json` are the committed versioned migration history. Apply only reviewed, checked-in additive migrations with `pnpm db:migrate`. The KES migration preserves existing challenge rows as `DEMO`; it does not convert demo balances or transactions into KES. Existing historical records should be retained. Before manual/export operations, make a separately stored encrypted backup using an authorized MySQL client and rehearse restoration outside the live application. The managed platform does not provide a separate dev database or built-in database backup/restore API.
+`drizzle/schema.ts` is the source schema; `drizzle/*.sql` and `drizzle/meta/_journal.json` are the committed versioned migration history. Production startup applies only the pending journal entries, serialized with a MySQL advisory lock, while readiness remains `503`; use `pnpm db:migrate` for deliberate manual application. The KES migration preserves existing challenge rows as `DEMO`; it does not convert demo balances or transactions into KES. Existing historical records should be retained. Before manual/export operations, make a separately stored encrypted backup using an authorized MySQL client and rehearse restoration outside the live application. The managed platform does not provide a separate dev database or built-in database backup/restore API.
 
 ## Match evidence, privacy and records
 
