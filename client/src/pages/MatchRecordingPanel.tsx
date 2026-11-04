@@ -162,23 +162,25 @@ export default function MatchRecordingPanel({ matchId, status, evidenceDeadline,
   };
 
   const canPrepareCapture = ["AWAITING_STAKES", "READY", "IN_PROGRESS"].includes(status);
+  const liveMatch = status === "IN_PROGRESS";
+  const screenCaptureAvailable = typeof navigator !== "undefined" && typeof navigator.mediaDevices?.getDisplayMedia === "function" && typeof MediaRecorder !== "undefined";
   const evidenceWindowOpen = !!evidenceDeadline && new Date(evidenceDeadline).getTime() >= Date.now();
   const canUploadFile = status === "UNDER_REVIEW" || (["AWAITING_EVIDENCE", "COMPLETED", "DRAWN"].includes(status) && evidenceWindowOpen);
   const uploaded = Boolean(existing) || uploadCompleteRef.current;
 
-  return <section className="card" aria-labelledby={`recording-title-${matchId}`}>
+  return <section className="card" style={liveMatch ? { borderColor: "var(--amber)" } : undefined} aria-labelledby={`recording-title-${matchId}`}>
     <div className="card-header">
-      <div><h3 id={`recording-title-${matchId}`}>Optional match recording</h3><p>Supplementary evidence only. The server still compares both players' submitted scores; it does not automatically read the scoreboard from video.</p></div>
-      {recording ? <Circle size={17} color="var(--amber)" fill="var(--amber)" aria-label="Recording active" /> : <Camera size={17} color="var(--lime)" />}
+      <div><h3 id={`recording-title-${matchId}`}>Match screen recording</h3><p>Supplementary dispute evidence. {liveMatch ? "The match is live; you can start recording now." : "You can prepare the screen capture before kickoff."} Browser approval is required, no microphone audio is captured, and video does not automatically verify the scoreboard.</p></div>
+      {recording ? <span className="notice notice-warning" role="status" aria-live="polite"><Circle size={13} color="var(--amber)" fill="var(--amber)" /> RECORDING LIVE</span> : liveMatch ? <span className="notice notice-warning" role="status" aria-live="polite">Match live · recording not started</span> : <Camera size={17} color="var(--lime)" aria-hidden="true" />}
     </div>
     {uploaded ? <div className="notice"><strong>Recording received.</strong> The clip is encrypted and restricted to you and, during review, authorized administrators. It is scheduled for deletion after the evidence window unless a review/dispute keeps it temporarily.</div> : <>
       {canPrepareCapture && <div className="page-stack">
-        <p className="field-help">On desktop, choose the game screen/window in the browser prompt. Recording starts only after the server starts the match. No microphone audio is captured. You can stop sharing at any time.</p>
+        <div className={`notice${liveMatch ? " notice-warning" : ""}`} role="status">{liveMatch ? <><strong>Match in progress.</strong> Choose Start screen recording, then approve sharing the game screen in your browser prompt. Recording will begin after approval.</> : <><strong>Before kickoff:</strong> Choose your game screen now so recording starts when both players confirm and the server starts the match.</>}</div>
         <div className="form-actions">
-          {!sharing ? <SpinnerButton type="button" disabled={uploading} onClick={() => void beginScreenShare()}><Camera size={15} />Choose screen to share</SpinnerButton> : <>
-            <span className="notice" role="status">{recording ? "Recording match video" : "Screen chosen · waiting for kickoff"}</span>
-            <SpinnerButton type="button" className="button button-danger" onClick={() => { const active = recorderRef.current; if (active?.state === "recording") active.stop(); else streamRef.current?.getTracks().forEach(track => track.stop()); }}><Square size={14} />Stop sharing</SpinnerButton>
-          </>}
+          {sharing ? <>
+            <span className={`notice${recording ? " notice-warning" : ""}`} role="status" aria-live="polite">{recording ? <><Circle size={13} color="var(--amber)" fill="var(--amber)" /> Recording the selected screen now</> : liveMatch ? "Screen is shared, but recording is not active." : "Screen chosen · waiting for kickoff"}</span>
+            <SpinnerButton type="button" className="button button-danger" onClick={() => { const active = recorderRef.current; if (active?.state === "recording") active.stop(); else streamRef.current?.getTracks().forEach(track => track.stop()); }}><Square size={14} />{recording ? "Stop and upload" : "Stop sharing"}</SpinnerButton>
+          </> : screenCaptureAvailable ? <SpinnerButton type="button" disabled={uploading} onClick={() => void beginScreenShare()}><Camera size={15} />{liveMatch ? "Start screen recording" : "Choose screen before kickoff"}</SpinnerButton> : <div className="notice notice-warning" role="status">Live screen recording is not supported in this browser. After the match, upload a saved recording during the evidence window.</div>}
         </div>
       </div>}
       {canUploadFile && <div className="form-grid">
@@ -187,7 +189,7 @@ export default function MatchRecordingPanel({ matchId, status, evidenceDeadline,
       </div>}
       {captured && !uploading && error && <div className="form-actions"><SpinnerButton type="button" onClick={() => void uploadBlob(captured)}><Upload size={14} />Retry recording upload</SpinnerButton></div>}
       {uploading && <div className="notice" role="status"><FileVideo2 size={14} /> Uploading encrypted video evidence…</div>}
-      {sharing && status !== "IN_PROGRESS" && <div className="field-help">The selected screen is armed. Once both players are ready and the match begins, recording starts.</div>}
+      {sharing && !liveMatch && <div className="field-help">The selected screen is armed. Once both players are ready and the match begins, recording starts.</div>}
       {error && <div className="notice notice-warning" role="alert">{error}</div>}
     </>}
     {existing?.url && <div className="form-actions"><a className="button button-ghost" href={existing.url} target="_blank" rel="noreferrer">View your uploaded recording</a></div>}
