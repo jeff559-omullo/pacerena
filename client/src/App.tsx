@@ -67,6 +67,7 @@ function Router() {
     <Route path="/profile">{() => <PlayerRoute><SettingsPage /></PlayerRoute>}</Route>
     <Route path="/settings">{() => <PlayerRoute><SettingsPage /></PlayerRoute>}</Route>
     <Route path="/admin">{() => <AdminRoute />}</Route>
+    <Route path="/admin/withdrawals">{() => <AdminRoute />}</Route>
     <Route path="/admin/disputes">{() => <AdminRoute />}</Route>
     <Route path="/admin/matches/:id">{() => <AdminRoute />}</Route>
     <Route path="/404" component={NotFound} />

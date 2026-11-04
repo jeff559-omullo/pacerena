@@ -4,8 +4,8 @@ import { promisify } from "node:util";
 import nodemailer from "nodemailer";
 import { z } from "zod";
 import { and, eq, gt, isNull } from "drizzle-orm";
-import { authSessions, emailAccounts, profiles, users, walletAccounts, walletTransactions } from "../drizzle/schema";
-import { normalizeEmail, STARTER_CREDITS } from "../shared/pace";
+import { authSessions, emailAccounts, profiles, users } from "../drizzle/schema";
+import { normalizeEmail } from "../shared/pace";
 import * as dbHelpers from "./db";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { ENV } from "./_core/env";
@@ -175,8 +175,8 @@ async function sendLink(email: string, link: string) {
     from,
     to: email,
     subject: "Reset your Pace Arena password",
-    text: `Choose a new password: ${link}\n\nThis link expires in 30 minutes. If you did not request this, ignore this message. Demo credits have no monetary value.`,
-    html: `<p>Choose a new password:</p><p><a href="${link}">Choose a new password</a></p><p>This link expires in 30 minutes. If you did not request this, ignore this message. Demo credits have no monetary value.</p>`,
+    text: `Choose a new password: ${link}\n\nThis link expires in 30 minutes. If you did not request this, ignore this message.`,
+    html: `<p>Choose a new password:</p><p><a href="${link}">Choose a new password</a></p><p>This link expires in 30 minutes. If you did not request this, ignore this message.</p>`,
   });
 }
 async function safeSendLink(email: string, link: string) {
@@ -188,23 +188,6 @@ async function safeSendLink(email: string, link: string) {
     if (error instanceof TRPCError) throw error;
     throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "We could not deliver account email. Check mail configuration or try again later." });
   }
-}
-async function grantStarterCredits(tx: any, userId: number) {
-  const existing = await tx.select({ userId: walletAccounts.userId }).from(walletAccounts).where(eq(walletAccounts.userId, userId)).for("update").limit(1);
-  if (existing.length) return;
-  await tx.insert(walletAccounts).values({ userId, availableCredits: STARTER_CREDITS, reservedCredits: 0 });
-  await tx.insert(walletTransactions).values({
-    userId,
-    transactionType: "initial_grant",
-    amount: STARTER_CREDITS,
-    availableBefore: 0,
-    availableAfter: STARTER_CREDITS,
-    reservedBefore: 0,
-    reservedAfter: 0,
-    status: "completed",
-    idempotencyKey: `starter:${userId}`,
-    reason: "One-time initial demo-credit grant at account creation.",
-  });
 }
 const emailSchema = z.string().trim().email().max(320).transform(normalizeEmail);
 const passwordSchema = z.string().min(10, "Use at least 10 characters.").max(128, "Password is too long.");
@@ -236,7 +219,6 @@ export const authRouter = router({
           passwordHash: await hashPassword(input.password),
         });
         await tx.insert(profiles).values({ userId: createdUserId, username: input.username, country: "KE", availability: "away", eligibility: "eligible" });
-        await grantStarterCredits(tx, createdUserId);
         await tx.insert(authSessions).values({ userId: createdUserId, tokenHash: digest(sessionToken), expiresAt: new Date(Date.now() + SESSION_MS), lastUsedAt: new Date() });
         return createdUserId;
       });
@@ -263,7 +245,6 @@ export const authRouter = router({
       throw new TRPCError({ code: "UNAUTHORIZED", message: "Email or password is incorrect." });
     }
     await database.update(emailAccounts).set({ failedLoginCount: 0, lockedUntil: null }).where(eq(emailAccounts.userId, account.userId));
-    await database.transaction(async tx => grantStarterCredits(tx, account.userId));
     await createSession(ctx, account.userId);
     const user = await dbHelpers.getUserById(account.userId);
     return user;

@@ -1,8 +1,12 @@
 # Pace Arena
 
-A responsive football-game challenge platform for eFootball/PES and EA Sports FC/FIFA. The initial environment is Kenya. All wallet balances are **simulated demo credits with no monetary value**: no purchases, deposits, withdrawals, cash prizes, cash-out or payments are implemented. The site is independent and is not affiliated with game publishers.
+A responsive football-game challenge platform for eFootball/PES and EA Sports FC/FIFA, initially serving players in Kenya. Registration gives immediate access without email verification or a starter balance. New challenges use KES only when server-side wallet and wagering gates are enabled. Pace Arena is independent and is not affiliated with game publishers.
 
-Email verification is not required. Registration creates the account, session and one-time, idempotent grant of 1,000 demo credits, recorded in the wallet ledger. Duplicate email addresses and usernames are rejected and the grant is tied to the account. The demo is rate-limited and not Sybil-proof across unrelated email addresses; it does not collect phone numbers, device fingerprints or precise location to try to link separate accounts. Because inbox ownership is not checked, do not use email address alone as proof of identity or to grant administrator privileges.
+## Money movement boundary
+
+The separate partner website owns checkout and any M-Pesa STK flow. Pace Arena does not initiate checkout/STK. A player's KES wallet is credited only when the partner server sends a valid signed event after confirming settlement. The application does not send withdrawal money: an administrator sends the M-Pesa payment externally from the approved business account, then records the actual amount, receipt/reference and reason. Pending requests are not payouts.
+
+KES gates default off. Do not enable them until the partner contract, callback configuration, operational controls, required legal review and payment-provider approvals have been independently confirmed for the relevant businesses and activities. The owner has stated they have a license and a separate licensed site; Pace Arena has not verified that license, its holder, scope or whether it covers this application. This repository makes no licensing or compliance claim.
 
 ## Stack and development
 
@@ -14,38 +18,44 @@ pnpm db:migrate
 pnpm dev
 ```
 
-The development and published deployments use the same managed database. Treat migrations and all development writes as production data changes. Only apply checked-in additive migrations; do not use sample users, hidden mock wallets or destructive acceptance testing against this database.
+The development and published deployments use the same managed database. Treat migrations and all development writes as production data changes. Apply checked-in migrations only; do not use sample users, mock wallets, live partner events, payout tests or destructive acceptance testing against this shared database.
 
 ## Configuration
 
-Copy `.env.example` for a separately hosted local environment. In the managed project, use protected project configuration for `PACE_SMTP_USERNAME`, `PACE_SMTP_APP_PASSWORD`, `PACE_SMTP_FROM` and the optional generic `PACE_SMTP_URL` fallback; do not commit or print their values. The platform injects `DATABASE_URL`, `MANUS_API_URL`, `MANUS_API_KEY`, the project identity and the signed-cookie secret. Keep these server-side.
+Use protected project secrets for hosted credentials. `.env.example` contains placeholders only. The platform injects `DATABASE_URL`, `MANUS_API_URL`, `MANUS_API_KEY`, project identity and signed-cookie configuration; keep them server-side.
 
-- `DATABASE_URL`: managed MySQL-compatible connection string (provided by the project for development and production).
-- `PACE_SMTP_USERNAME` and `PACE_SMTP_APP_PASSWORD`: preferred Gmail setup; the server enforces TLS on `smtp.gmail.com:587` and removes grouping spaces from Google's generated App Password. Use an App Password, never a normal Google account password.
-- `PACE_SMTP_URL`: optional credentialed `smtp://` or `smtps://` fallback for non-Gmail providers, used only when the Gmail username/password pair is unset.
-- `PACE_SMTP_FROM`: sender address/name that your SMTP provider authorizes.
-- `PORT`: server listening port; defaults to 3000.
+- `PACE_SMTP_USERNAME`, `PACE_SMTP_APP_PASSWORD`, `PACE_SMTP_FROM`, or optional `PACE_SMTP_URL`: password-reset mail only; registration/login do not send email.
+- `PACE_KES_WALLET_ENABLED=true`: wallet actions remain unavailable unless the partner URL, at least 32 bytes of shared HMAC secret and all configured positive KES limits are valid.
+- `PACE_REAL_WAGERING_ENABLED=true`: independently enables new KES wagers only when the KES wallet configuration is valid.
+- `PACE_PARTNER_CALLBACK_SECRET`: shared server-only HMAC-SHA256 key. Configure it as a protected secret on both servers; never place it in frontend code, a repository or chat.
+- `PACE_CREDIT_PARTNER_URL`: HTTPS purchase page on the external partner site.
+- `PACE_KES_MIN_DEPOSIT`, `PACE_KES_MAX_DEPOSIT`, `PACE_KES_MIN_STAKE`, `PACE_KES_MAX_STAKE`, `PACE_KES_MIN_WITHDRAWAL`, `PACE_KES_MAX_WITHDRAWAL`: positive whole-shilling bounds; the stake range must remain within KES 10–5,000.
+- `PORT`: listener port; defaults to 3000.
 
-SMTP is not used during registration or login. If SMTP is unavailable, password-reset links cannot be delivered until mail is configured and checked. Administrator roles are never granted by email matching: an existing administrator must perform a reason-required role change in the operations desk, and each change is audited. Never paste credentials into source, chat, build-time frontend variables, or screenshots.
+The partner callback contract and example payload/signing format are in [PARTNER_INTEGRATION.md](PARTNER_INTEGRATION.md). Do not send a browser redirect or user-entered receipt as credit evidence. Callbacks use `POST /api/partner/v1/credit-events`, a five-minute timestamp window, exact raw-body signing, constant-time HMAC comparison, event/transaction deduplication and atomic wallet-ledger updates. Signed reversals that cannot safely debit funds freeze the wallet for audited administrator review.
 
-For a fresh database with no administrator, a trusted database operator must provision the first admin role once; after that, use the audited role controls in the operations desk. Email addresses and identity-provider upserts never bootstrap administrator access.
+## Manual M-Pesa withdrawals
+
+A player enters a KES amount and Kenyan M-Pesa number. The server normalizes the number, verifies wallet eligibility and limits, then reserves the amount atomically. An administrator sends money outside Pace Arena and records the external receipt/reference, actual amount and reason; or rejects with a reason and releases the reservation. The system never submits a payout transfer. A frozen wallet cannot be paid out until reversal review is resolved.
+
+## Authentication and authorization
+
+Pace Arena uses email/password credentials without an email-verification step and opaque server sessions in the `pace_arena_session` cookie. Successful registration signs the player in immediately and creates no demo-credit grant. Public HTTPS Preview traffic uses `SameSite=None; Secure` based on the forwarded public protocol; local plain-HTTP handling is separate. Password reset still requires configured email delivery. Administrator roles are never granted by email matching; an existing administrator must perform reason-required, audited role changes, and cannot remove the final administrator.
+
+For a fresh database with no administrator, a trusted database operator must provision the first admin role once. Email addresses and identity-provider upserts never bootstrap administrator access.
 
 ## Migrations and persistent data
 
-`drizzle/schema.ts` is the source schema; `drizzle/*.sql` and `drizzle/meta/_journal.json` are the committed versioned migration history. Apply existing migrations with `pnpm db:migrate`. After intentional schema edits, generate and inspect a new migration, then apply it with the project migration command. Database and migration state persist across deploys, and development shares them with production. Before any manual/export operation, take a separately stored encrypted backup using an authorized MySQL client and rehearse restoration outside the live application. The managed platform does not provide a separate dev database or a built-in database backup/restore API.
+`drizzle/schema.ts` is the source schema; `drizzle/*.sql` and `drizzle/meta/_journal.json` are the committed versioned migration history. Apply only reviewed, checked-in additive migrations with `pnpm db:migrate`. The KES migration preserves existing challenge rows as `DEMO`; it does not convert demo balances or transactions into KES. Existing historical records should be retained. Before manual/export operations, make a separately stored encrypted backup using an authorized MySQL client and rehearse restoration outside the live application. The managed platform does not provide a separate dev database or built-in database backup/restore API.
 
-## Authentication, privacy and evidence
+## Match evidence, privacy and records
 
-Pace Arena uses email/password credentials without an email-verification step and opaque server sessions in the `pace_arena_session` cookie. Successful registration signs the player in immediately. Public HTTPS Preview traffic uses `SameSite=None; Secure` based on the forwarded public protocol; local plain-HTTP handling is separate. Normal player, match-participant and administrator authorization is checked on the backend. The browser receives no database or SMTP credential and cannot submit a role, resulting balance, or trusted match time. Since signup does not verify inbox ownership, each player must protect their password; password recovery still depends on receiving email.
+The managed MySQL service does not provide native row-level-security policies. Server-side user-scoped relationship checks and role middleware authorize application reads and writes. Screenshot evidence and match recordings are private and accessed through authenticated participant/admin routes. Gameplay screen capture is explicit and browser-consented on supported desktop browsers, starts only after the server marks the match in progress, has no microphone audio, and can be stopped by the player. Console/mobile players may upload a locally recorded clip. Video is encrypted in a temporary database record and is supplementary evidence, not cryptographic proof or automatic scoreboard OCR. Undisputed clips expire five minutes after the evidence window; review/dispute clips are retained until resolution, then expire five minutes later. Database-row deletion cannot guarantee removal from backups.
 
-The managed MySQL service does **not** provide native row-level-security policies. Data access is therefore guarded in the application server with user-scoped relationship checks, locked transactions and role middleware. The managed object store does not offer per-object ACLs either: screenshots are encrypted with AES-256-GCM, object keys remain server-side, metadata ties each object to an authorized match, and media is streamed only through authenticated participant/admin routes with `private, no-store` responses. Screenshots and user-entered scores are evidence—not independently authenticated game results. No transfer occurs when evidence conflicts or is missing; those cases require review.
+Historical demo wallets/ledgers and any original demo matches are non-cash records. New demo grants, deposits, withdrawals and challenge creation/acceptance are retired. Never convert demo balances into KES.
 
 ## Routes, health and production
 
-The client route list is maintained in `client/public/manus-routes.json` and must match `client/src/App.tsx`. Unknown paths render the not-found page; the Express server serves the SPA entry for application pages and `/api/health` is the unauthenticated readiness endpoint. Run `pnpm check`, `pnpm test` and `pnpm build` before a checkpoint. Production start is `pnpm start`; the listener honors `PORT`. The checked-in `Dockerfile` builds the frontend and server for the managed container deployment. A checkpoint is a saved commit on the project's canonical `main` branch; checkpointing and publishing are separate actions.
+The client route list is maintained in `client/public/manus-routes.json` and should match `client/src/App.tsx`. Unknown paths render the not-found page; `/api/health` is the unauthenticated readiness endpoint. Run `pnpm check`, `pnpm test` and `pnpm build` before a checkpoint. Production start is `pnpm start`; the listener honors `PORT`. The checked-in `Dockerfile` builds the frontend and server for managed container deployment. A checkpoint is a saved commit on the project's canonical `main` branch; checkpointing and publishing are separate actions.
 
-## Product boundaries
-
-Administrators can pause **new** challenges, adjust the minimum/maximum permitted stake within the database-enforced 10–5,000 demo-credit ceiling, set a default match duration within 6–30 minutes, and post a short operational notice. Changes require a reason, are auditable, apply only to new challenges, and never change already agreed match terms. Real-money settings do not exist.
-
-The application uses same-named game editions and specific platforms for matchmaking; it does not assume mobile/PC/PlayStation/Xbox cross-play compatibility. In-app notifications are persistent but are not browser push or guaranteed realtime. Timeout work runs in the application server and always rechecks the database state before taking action. Before any real-money feature in Kenya, obtain independent legal advice on regulatory classification/licensing and confirm selected payment-provider approval; this project makes no such licensing or compliance claim.
+Notifications are persisted in-app, not guaranteed browser push. Compatibility checks use selected editions and platforms and do not assume cross-play. Timeout processing rechecks database state before transitions. Do not describe the product as licensed or compliant without independent verification.

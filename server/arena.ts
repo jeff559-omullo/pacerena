@@ -6,9 +6,12 @@ import {
   challenges,
   disputeAttachments,
   disputes,
+  kesWalletAccounts,
+  kesWalletTransactions,
   matchCodes,
   matchEvidence,
   matchParticipants,
+  matchRecordings,
   matches,
   matchStateEvents,
   notifications,
@@ -37,6 +40,8 @@ import { getDb } from "./db";
 import { canViewChallengeDetails } from "./challenge-access";
 import { adminProcedure, protectedProcedure, router } from "./_core/trpc";
 import { storePrivateEvidence } from "./evidence";
+import { cleanupExpiredMatchRecordings } from "./match-recordings";
+import { ensureKesWalletAccount, getKesWalletConfig, isKesWageringEnabled } from "./kes-wallet";
 
 const gameSchema = z.enum(["efootball", "ea_fc"]);
 const platformSchema = z.enum(["android", "ios", "pc", "ps4", "ps5", "xbox_one", "xbox_series", "switch"]);
@@ -91,6 +96,13 @@ async function requireEligible(tx: any, userId: number) {
   if (!profile || profile.eligibility !== "eligible") forbidden("Your account is not eligible to enter a match. Contact support or review the account notice.");
   return profile;
 }
+async function requireKesEligible(tx: any, userId: number) {
+  const profile = await requireEligible(tx, userId);
+  if (profile.cashWalletStatus !== "verified") forbidden("Your KES wallet must be verified by an administrator before you can wager.");
+  const wallet = await ensureKesWalletAccount(tx, userId);
+  if (wallet.frozen === 1) forbidden("Your KES wallet is frozen for administrator review; wagering is paused.");
+  return profile;
+}
 async function ensureNoActiveMatch(tx: any, userId: number) {
   const active = await tx.select({ matchId: matches.id }).from(matchParticipants)
     .innerJoin(matches, eq(matches.id, matchParticipants.matchId))
@@ -103,6 +115,79 @@ async function lockWallet(tx: any, userId: number) {
   const wallet = rows[0];
   if (!wallet) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No demo wallet is available for this account." });
   return wallet;
+}
+type StakeCurrency = "DEMO" | "KES";
+type StakeTransactionType = "stake_reservation" | "stake_release" | "winner_reward" | "draw_refund" | "cancellation_refund" | "stake_consumption";
+async function lockWagerWallet(tx: any, userId: number, currency: StakeCurrency) {
+  if (currency === "KES") {
+    const wallet = await ensureKesWalletAccount(tx, userId);
+    return { available: wallet.availableKes, reserved: wallet.reservedKes };
+  }
+  const wallet = await lockWallet(tx, userId);
+  return { available: wallet.availableCredits, reserved: wallet.reservedCredits };
+}
+async function saveWagerWallet(tx: any, userId: number, currency: StakeCurrency, available: number, reserved: number) {
+  if (currency === "KES") {
+    await tx.update(kesWalletAccounts).set({ availableKes: available, reservedKes: reserved }).where(eq(kesWalletAccounts.userId, userId));
+    return;
+  }
+  await tx.update(walletAccounts).set({ availableCredits: available, reservedCredits: reserved }).where(eq(walletAccounts.userId, userId));
+}
+async function recordWagerLedger(tx: any, currency: StakeCurrency, input: {
+  userId: number; challengeId?: number | null; matchId?: number | null; transactionType: StakeTransactionType;
+  amount: number; availableBefore: number; availableAfter: number; reservedBefore: number; reservedAfter: number;
+  idempotencyKey: string; reason: string;
+}) {
+  if (currency === "KES") {
+    const transactionType = input.transactionType === "cancellation_refund" ? "stake_release" : input.transactionType;
+    await tx.insert(kesWalletTransactions).values({
+      userId: input.userId,
+      challengeId: input.challengeId ?? null,
+      matchId: input.matchId ?? null,
+      transactionType,
+      amountKes: input.amount,
+      availableBeforeKes: input.availableBefore,
+      availableAfterKes: input.availableAfter,
+      reservedBeforeKes: input.reservedBefore,
+      reservedAfterKes: input.reservedAfter,
+      status: input.transactionType === "stake_reservation" ? "reserved" : input.transactionType === "stake_release" || input.transactionType === "cancellation_refund" ? "released" : "completed",
+      idempotencyKey: input.idempotencyKey,
+      reason: input.reason,
+    });
+    return;
+  }
+  await ledger(tx, {
+    userId: input.userId,
+    matchId: input.matchId ?? null,
+    transactionType: input.transactionType,
+    amount: input.amount,
+    availableBefore: input.availableBefore,
+    availableAfter: input.availableAfter,
+    reservedBefore: input.reservedBefore,
+    reservedAfter: input.reservedAfter,
+    idempotencyKey: input.idempotencyKey,
+    reason: input.reason,
+  });
+}
+async function refundOpenChallenge(tx: any, challenge: typeof challenges.$inferSelect, idempotencyKey: string, reason: string) {
+  const currency = challenge.stakeCurrency as StakeCurrency;
+  const wallet = await lockWagerWallet(tx, challenge.creatorId, currency);
+  if (wallet.reserved < challenge.stake) throw new Error("Reserved challenge stake invariant failed");
+  const availableAfter = wallet.available + challenge.stake;
+  const reservedAfter = wallet.reserved - challenge.stake;
+  await saveWagerWallet(tx, challenge.creatorId, currency, availableAfter, reservedAfter);
+  await recordWagerLedger(tx, currency, {
+    userId: challenge.creatorId,
+    challengeId: challenge.id,
+    transactionType: "cancellation_refund",
+    amount: challenge.stake,
+    availableBefore: wallet.available,
+    availableAfter,
+    reservedBefore: wallet.reserved,
+    reservedAfter,
+    idempotencyKey,
+    reason,
+  });
 }
 async function transitionMatch(tx: any, current: any, toState: MatchState, patch: Record<string, unknown>, actorUserId: number | null, reason: string) {
   const fromState = current.status as MatchState;
@@ -136,15 +221,17 @@ async function refundStakes(tx: any, matchId: number, participants: any[], reaso
   const matchRows = await tx.select().from(matches).where(eq(matches.id, matchId)).for("update").limit(1);
   let match = matchRows[0];
   if (!match) notFound();
+  const challengeRows = await tx.select({ stakeCurrency: challenges.stakeCurrency }).from(challenges).where(eq(challenges.id, match.challengeId)).limit(1);
+  const currency = (challengeRows[0]?.stakeCurrency ?? "DEMO") as StakeCurrency;
   for (const participant of [...participants].sort((a, b) => a.userId - b.userId)) {
-    const wallet = await lockWallet(tx, participant.userId);
-    if (wallet.reservedCredits < participant.stake) throw new Error("Reserved stake invariant failed during refund");
-    const availableAfter = wallet.availableCredits + participant.stake;
-    const reservedAfter = wallet.reservedCredits - participant.stake;
-    await tx.update(walletAccounts).set({ availableCredits: availableAfter, reservedCredits: reservedAfter }).where(eq(walletAccounts.userId, participant.userId));
-    await ledger(tx, {
+    const wallet = await lockWagerWallet(tx, participant.userId, currency);
+    if (wallet.reserved < participant.stake) throw new Error("Reserved stake invariant failed during refund");
+    const availableAfter = wallet.available + participant.stake;
+    const reservedAfter = wallet.reserved - participant.stake;
+    await saveWagerWallet(tx, participant.userId, currency, availableAfter, reservedAfter);
+    await recordWagerLedger(tx, currency, {
       userId: participant.userId, matchId, transactionType: "cancellation_refund", amount: participant.stake,
-      availableBefore: wallet.availableCredits, availableAfter, reservedBefore: wallet.reservedCredits, reservedAfter,
+      availableBefore: wallet.available, availableAfter, reservedBefore: wallet.reserved, reservedAfter,
       idempotencyKey: `refund:${matchId}:${participant.userId}`, reason,
     });
   }
@@ -162,27 +249,34 @@ async function settleScores(tx: any, matchId: number, participants: any[], winne
   if (winnerUserId !== null && !participants.some((p: any) => p.userId === winnerUserId)) {
     throw new TRPCError({ code: "BAD_REQUEST", message: "The selected winner is not a participant." });
   }
+  const challengeRows = await tx.select({ stakeCurrency: challenges.stakeCurrency }).from(challenges).where(eq(challenges.id, match.challengeId)).limit(1);
+  const currency = (challengeRows[0]?.stakeCurrency ?? "DEMO") as StakeCurrency;
+  if (currency === "KES" && winnerUserId !== null && !isKesWageringEnabled()) {
+    throw new TRPCError({ code: "PRECONDITION_FAILED", message: "KES winner settlement is paused by the server configuration. The reserved stakes remain unchanged until it is enabled again." });
+  }
   const pool = participants.reduce((sum: number, p: any) => sum + p.stake, 0);
   for (const participant of [...participants].sort((a, b) => a.userId - b.userId)) {
-    const wallet = await lockWallet(tx, participant.userId);
-    if (wallet.reservedCredits < participant.stake) throw new Error("Reserved stake invariant failed during settlement");
+    const wallet = await lockWagerWallet(tx, participant.userId, currency);
+    if (wallet.reserved < participant.stake) throw new Error("Reserved stake invariant failed during settlement");
     const isWinner = winnerUserId === participant.userId;
     const isDraw = winnerUserId === null;
-    const availableAfter = wallet.availableCredits + (isWinner ? pool : isDraw ? participant.stake : 0);
-    const reservedAfter = wallet.reservedCredits - participant.stake;
-    await tx.update(walletAccounts).set({ availableCredits: availableAfter, reservedCredits: reservedAfter }).where(eq(walletAccounts.userId, participant.userId));
+    const availableAfter = wallet.available + (isWinner ? pool : isDraw ? participant.stake : 0);
+    const reservedAfter = wallet.reserved - participant.stake;
+    await saveWagerWallet(tx, participant.userId, currency, availableAfter, reservedAfter);
     const transactionType = isWinner ? "winner_reward" : isDraw ? "draw_refund" : "stake_consumption";
     const amount = isWinner ? pool : participant.stake;
-    await ledger(tx, {
+    const currencyLabel = currency === "KES" ? "KES" : "legacy demo-credit";
+    await recordWagerLedger(tx, currency, {
       userId: participant.userId, matchId, transactionType, amount,
-      availableBefore: wallet.availableCredits, availableAfter, reservedBefore: wallet.reservedCredits, reservedAfter,
+      availableBefore: wallet.available, availableAfter, reservedBefore: wallet.reserved, reservedAfter,
       idempotencyKey: `settle:${matchId}:${participant.userId}`,
-      reason: `${reason} ${isWinner ? "Winner receives the agreed demo pool." : isDraw ? "Draw returns each player's own stake." : "Losing reserved demo stake is consumed."}`,
+      reason: `${reason} ${isWinner ? `Winner receives the agreed ${currencyLabel} pool.` : isDraw ? "Draw returns each player's own stake." : `Losing reserved ${currencyLabel} stake is consumed.`}`,
     });
   }
   await transitionMatch(tx, match, winnerUserId === null ? "DRAWN" : "COMPLETED", { settledAt: new Date() }, actorUserId, reason);
   for (const participant of participants) {
-    await notify(tx, participant.userId, winnerUserId === null ? "draw_refund" : "match_result", winnerUserId === null ? "Match drawn" : winnerUserId === participant.userId ? "Match won" : "Match complete", winnerUserId === null ? "Your own reserved stake has been returned." : winnerUserId === participant.userId ? `The agreed ${pool}-credit demo pool has been added to your wallet.` : "The submitted result was resolved. Check your match and ledger details.", "match", matchId);
+    const currencyLabel = currency === "KES" ? "KES" : "legacy demo-credit";
+    await notify(tx, participant.userId, winnerUserId === null ? "draw_refund" : "match_result", winnerUserId === null ? "Match drawn" : winnerUserId === participant.userId ? "Match won" : "Match complete", winnerUserId === null ? "Your own reserved stake has been returned." : winnerUserId === participant.userId ? `The agreed ${pool} ${currencyLabel} pool has been added to your wallet.` : "The submitted result was resolved. Check your match and ledger details.", "match", matchId);
   }
 }
 
@@ -191,10 +285,14 @@ export const arenaRouter = router({
     rules: protectedProcedure.query(async () => {
       const db = await database();
       const settings = await getPlatformSettings(db);
+      const walletConfig = getKesWalletConfig();
+      const wageringEnabled = isKesWageringEnabled();
       return {
-        challengeCreationEnabled: settings.challengeCreationEnabled === 1,
-        minimumStake: settings.minimumStake,
-        maximumStake: settings.maximumStake,
+        challengeCreationEnabled: settings.challengeCreationEnabled === 1 && wageringEnabled,
+        walletEnabled: Boolean(walletConfig),
+        wageringEnabled,
+        minimumStake: walletConfig?.minStake ?? STAKE_MIN,
+        maximumStake: walletConfig?.maxStake ?? STAKE_MAX,
         defaultMatchMinutes: settings.defaultMatchMinutes,
         maintenanceNotice: settings.maintenanceNotice,
       };
@@ -202,10 +300,9 @@ export const arenaRouter = router({
   }),
   dashboard: protectedProcedure.query(async ({ ctx }) => {
     const db = await database();
-    const [walletRows, challengeRows, matchRows, notificationRows, profileRows] = await Promise.all([
-      db.select().from(walletAccounts).where(eq(walletAccounts.userId, ctx.user.id)).limit(1),
-      db.select().from(challenges).where(and(eq(challenges.status, "open"), gt(challenges.expiresAt, new Date()), ne(challenges.creatorId, ctx.user.id), or(isNull(challenges.opponentId), eq(challenges.opponentId, ctx.user.id)))).limit(100),
-      db.select({ match: matches, participant: matchParticipants }).from(matchParticipants).innerJoin(matches, eq(matches.id, matchParticipants.matchId)).where(eq(matchParticipants.userId, ctx.user.id)).orderBy(desc(matches.createdAt)).limit(10),
+    const [challengeRows, matchRows, notificationRows, profileRows] = await Promise.all([
+      isKesWageringEnabled() ? db.select().from(challenges).where(and(eq(challenges.stakeCurrency, "KES"), eq(challenges.status, "open"), gt(challenges.expiresAt, new Date()), ne(challenges.creatorId, ctx.user.id), or(isNull(challenges.opponentId), eq(challenges.opponentId, ctx.user.id)))).limit(100) : Promise.resolve([]),
+      db.select({ match: matches, participant: matchParticipants, challenge: challenges }).from(matchParticipants).innerJoin(matches, eq(matches.id, matchParticipants.matchId)).innerJoin(challenges, eq(challenges.id, matches.challengeId)).where(eq(matchParticipants.userId, ctx.user.id)).orderBy(desc(matches.createdAt)).limit(10),
       db.select().from(notifications).where(and(eq(notifications.userId, ctx.user.id), isNull(notifications.readAt))).orderBy(desc(notifications.createdAt)).limit(5),
       db.select().from(profiles).where(eq(profiles.userId, ctx.user.id)).limit(1),
     ]);
@@ -219,10 +316,9 @@ export const arenaRouter = router({
       platformB: profile.platform,
     })));
     return {
-      wallet: walletRows[0] ?? { availableCredits: 0, reservedCredits: 0 },
       openChallenges: compatible.length,
       incomingInvitations: compatible.filter(challenge => challenge.opponentId === ctx.user.id).length,
-      matches: matchRows.map(row => ({ ...row.match, mySide: row.participant.side, myStake: row.participant.stake })),
+      matches: matchRows.map(row => ({ ...row.match, mySide: row.participant.side, myStake: row.participant.stake, stakeCurrency: row.challenge.stakeCurrency })),
       notifications: notificationRows,
       profile: profile ?? null,
     };
@@ -274,8 +370,9 @@ export const arenaRouter = router({
   }),
   challenges: router({
     list: protectedProcedure.input(z.object({ game: gameSchema.optional(), edition: z.string().max(48).optional(), platform: platformSchema.optional(), stakeMin: z.number().int().min(0).optional(), stakeMax: z.number().int().min(0).optional(), availability: z.enum(["available", "away"]).optional() }).optional()).query(async ({ ctx, input }) => {
+      if (!isKesWageringEnabled()) return [];
       const db = await database();
-      const rows = await db.select({ challenge: challenges, creator: users, profile: profiles }).from(challenges).innerJoin(users, eq(users.id, challenges.creatorId)).innerJoin(profiles, eq(profiles.userId, challenges.creatorId)).where(and(eq(challenges.status, "open"), gt(challenges.expiresAt, new Date()), or(isNull(challenges.opponentId), eq(challenges.opponentId, ctx.user.id)))).orderBy(desc(challenges.createdAt)).limit(100);
+      const rows = await db.select({ challenge: challenges, creator: users, profile: profiles }).from(challenges).innerJoin(users, eq(users.id, challenges.creatorId)).innerJoin(profiles, eq(profiles.userId, challenges.creatorId)).where(and(eq(challenges.stakeCurrency, "KES"), eq(challenges.status, "open"), gt(challenges.expiresAt, new Date()), or(isNull(challenges.opponentId), eq(challenges.opponentId, ctx.user.id)))).orderBy(desc(challenges.createdAt)).limit(100);
       const ownProfileRows = await db.select().from(profiles).where(eq(profiles.userId, ctx.user.id)).limit(1);
       const ownProfile = ownProfileRows[0];
       return rows.filter(row => row.challenge.creatorId !== ctx.user.id &&
@@ -315,13 +412,15 @@ export const arenaRouter = router({
       inviteUsername: z.string().trim().min(3).max(24).regex(/^[a-zA-Z0-9_]+$/).transform(value => value.toLowerCase()).optional(),
     })).mutation(async ({ ctx, input }) => {
       limitUserAction(ctx, "challenge_create", 12);
+      const walletConfig = getKesWalletConfig();
+      if (!walletConfig || !isKesWageringEnabled()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "KES challenges are temporarily unavailable; the wallet and real-wagering settings are not enabled." });
       const db = await database();
       return db.transaction(async tx => {
         const arenaSettings = await getPlatformSettings(tx, true);
         if (arenaSettings.challengeCreationEnabled !== 1) throw new TRPCError({ code: "PRECONDITION_FAILED", message: arenaSettings.maintenanceNotice || "New challenges are temporarily paused by an administrator." });
-        if (!validateStakeBounds(input.stake, arenaSettings.minimumStake, arenaSettings.maximumStake)) throw new TRPCError({ code: "BAD_REQUEST", message: `Stake must be between ${arenaSettings.minimumStake} and ${arenaSettings.maximumStake} demo credits.` });
+        if (!validateStakeBounds(input.stake, walletConfig.minStake, walletConfig.maxStake)) throw new TRPCError({ code: "BAD_REQUEST", message: `Stake must be between KES ${walletConfig.minStake} and KES ${walletConfig.maxStake}.` });
         const matchMinutes = input.matchMinutes ?? arenaSettings.defaultMatchMinutes;
-        const profile = await requireEligible(tx, ctx.user.id);
+        const profile = await requireKesEligible(tx, ctx.user.id);
         await ensureNoActiveMatch(tx, ctx.user.id);
         if (profile.availability !== "available" || !profile.preferredGame || !profile.gameEdition || !profile.platform || !areCompatible({ gameA: input.game, gameB: profile.preferredGame, editionA: input.edition, editionB: profile.gameEdition, platformA: input.platform, platformB: profile.platform })) {
           throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Set your profile to Open to challenges and choose the same exact game edition and platform before publishing." });
@@ -330,13 +429,15 @@ export const arenaRouter = router({
         if (input.inviteUsername) {
           if (input.inviteUsername === profile.username) forbidden("You cannot send a challenge to yourself.");
           const [target] = await tx.select().from(profiles).where(eq(profiles.username, input.inviteUsername)).for("update").limit(1);
-          if (!target || target.eligibility !== "eligible" || target.availability !== "available" || !target.preferredGame || !target.gameEdition || !target.platform || !areCompatible({ gameA: input.game, gameB: target.preferredGame, editionA: input.edition, editionB: target.gameEdition, platformA: input.platform, platformB: target.platform })) {
+          if (!target || target.eligibility !== "eligible" || target.cashWalletStatus !== "verified" || target.availability !== "available" || !target.preferredGame || !target.gameEdition || !target.platform || !areCompatible({ gameA: input.game, gameB: target.preferredGame, editionA: input.edition, editionB: target.gameEdition, platformA: input.platform, platformB: target.platform })) {
             throw new TRPCError({ code: "PRECONDITION_FAILED", message: "That player is not currently eligible, available, or compatible with the selected game edition and platform." });
           }
+          const targetWallet = await ensureKesWalletAccount(tx, target.userId);
+          if (targetWallet.frozen === 1) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "That player's KES wallet is frozen for administrator review." });
           invitee = target;
         }
-        const wallet = await lockWallet(tx, ctx.user.id);
-        if (wallet.availableCredits < input.stake) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your available demo-credit balance is too low for that stake." });
+        const wallet = await ensureKesWalletAccount(tx, ctx.user.id);
+        if (wallet.availableKes < input.stake) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your available KES balance is too low for that stake." });
         const now = new Date();
         const id = insertId(await tx.insert(challenges).values({
           creatorId: ctx.user.id,
@@ -345,45 +446,47 @@ export const arenaRouter = router({
           edition: input.edition,
           platform: input.platform,
           stake: input.stake,
+          stakeCurrency: "KES",
           matchMinutes,
           settings: input.settings ?? null,
           description: input.description ?? null,
           status: "open",
           expiresAt: new Date(now.getTime() + input.expiryHours * 60 * 60_000),
         }));
-        const availableAfter = wallet.availableCredits - input.stake;
-        const reservedAfter = wallet.reservedCredits + input.stake;
-        await tx.update(walletAccounts).set({ availableCredits: availableAfter, reservedCredits: reservedAfter }).where(eq(walletAccounts.userId, ctx.user.id));
-        await ledger(tx, { userId: ctx.user.id, transactionType: "stake_reservation", amount: input.stake, availableBefore: wallet.availableCredits, availableAfter, reservedBefore: wallet.reservedCredits, reservedAfter, idempotencyKey: `challenge:${id}:stake`, reason: `Reserved ${input.stake} demo credits for challenge #${id}.` });
+        const availableAfter = wallet.availableKes - input.stake;
+        const reservedAfter = wallet.reservedKes + input.stake;
+        await tx.update(kesWalletAccounts).set({ availableKes: availableAfter, reservedKes: reservedAfter }).where(eq(kesWalletAccounts.userId, ctx.user.id));
+        await recordWagerLedger(tx, "KES", { userId: ctx.user.id, challengeId: id, transactionType: "stake_reservation", amount: input.stake, availableBefore: wallet.availableKes, availableAfter, reservedBefore: wallet.reservedKes, reservedAfter, idempotencyKey: `challenge:${id}:stake`, reason: `Reserved KES ${input.stake} for challenge #${id}.` });
         if (invitee) await notify(tx, invitee.userId, "challenge_received", "Direct challenge received", `${profile.username} invited you to an exact-edition ${GAME_LABELS[input.game]} match on ${PLATFORM_LABELS[input.platform]}.`, "challenge", id);
         return { id };
       });
     }),
     accept: protectedProcedure.input(z.object({ id: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
       limitUserAction(ctx, "challenge_accept", 12);
+      if (!isKesWageringEnabled()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "KES challenges are temporarily unavailable; real wagering is not enabled." });
       const db = await database();
       return db.transaction(async tx => {
         const rows = await tx.select().from(challenges).where(eq(challenges.id, input.id)).for("update").limit(1);
         const challenge = rows[0];
-        if (!challenge || challenge.status !== "open" || challenge.expiresAt.getTime() <= Date.now()) notFound();
+        if (!challenge || challenge.stakeCurrency !== "KES" || challenge.status !== "open" || challenge.expiresAt.getTime() <= Date.now()) notFound();
         if (challenge.creatorId === ctx.user.id) forbidden("You cannot accept your own challenge.");
         if (challenge.opponentId !== null && challenge.opponentId !== ctx.user.id) forbidden("This direct invitation is only visible to its invited player.");
-        const [creatorProfile] = await tx.select().from(profiles).where(eq(profiles.userId, challenge.creatorId)).for("update").limit(1);
-        const opponentProfile = await requireEligible(tx, ctx.user.id);
+        const creatorProfile = await requireKesEligible(tx, challenge.creatorId);
+        const opponentProfile = await requireKesEligible(tx, ctx.user.id);
         if (!creatorProfile || creatorProfile.eligibility !== "eligible" || creatorProfile.availability !== "available") throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The challenge creator is not currently eligible and available to play." });
         if (opponentProfile.availability !== "available") throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Set your profile availability to open for challenges before accepting." });
         const creatorCompatible = !!creatorProfile.preferredGame && !!creatorProfile.gameEdition && !!creatorProfile.platform && areCompatible({ gameA: challenge.game, gameB: creatorProfile.preferredGame, editionA: challenge.edition, editionB: creatorProfile.gameEdition, platformA: challenge.platform, platformB: creatorProfile.platform });
         const opponentCompatible = !!opponentProfile.preferredGame && !!opponentProfile.gameEdition && !!opponentProfile.platform && areCompatible({ gameA: challenge.game, gameB: opponentProfile.preferredGame, editionA: challenge.edition, editionB: opponentProfile.gameEdition, platformA: challenge.platform, platformB: opponentProfile.platform });
         if (!creatorCompatible || !opponentCompatible) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Both players must have matching game editions and supported platform selections in their profiles." });
-        const creatorWallet = await lockWallet(tx, challenge.creatorId);
-        if (creatorWallet.reservedCredits < challenge.stake) throw new Error("Challenge stake reservation is missing");
-        const opponentWallet = await lockWallet(tx, ctx.user.id);
+        const creatorWallet = await ensureKesWalletAccount(tx, challenge.creatorId);
+        if (creatorWallet.reservedKes < challenge.stake) throw new Error("Challenge KES stake reservation is missing");
+        const opponentWallet = await ensureKesWalletAccount(tx, ctx.user.id);
         await ensureNoActiveMatch(tx, challenge.creatorId);
         await ensureNoActiveMatch(tx, ctx.user.id);
-        if (opponentWallet.availableCredits < challenge.stake) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your available demo-credit balance is too low for this stake." });
+        if (opponentWallet.availableKes < challenge.stake) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your available KES balance is too low for this stake." });
         const now = new Date();
-        await tx.update(walletAccounts).set({ availableCredits: opponentWallet.availableCredits - challenge.stake, reservedCredits: opponentWallet.reservedCredits + challenge.stake }).where(eq(walletAccounts.userId, ctx.user.id));
-        await ledger(tx, { userId: ctx.user.id, transactionType: "stake_reservation", amount: challenge.stake, availableBefore: opponentWallet.availableCredits, availableAfter: opponentWallet.availableCredits - challenge.stake, reservedBefore: opponentWallet.reservedCredits, reservedAfter: opponentWallet.reservedCredits + challenge.stake, idempotencyKey: `challenge:${challenge.id}:accept:${ctx.user.id}`, reason: `Reserved ${challenge.stake} demo credits to accept challenge #${challenge.id}.` });
+        await tx.update(kesWalletAccounts).set({ availableKes: opponentWallet.availableKes - challenge.stake, reservedKes: opponentWallet.reservedKes + challenge.stake }).where(eq(kesWalletAccounts.userId, ctx.user.id));
+        await recordWagerLedger(tx, "KES", { userId: ctx.user.id, challengeId: challenge.id, transactionType: "stake_reservation", amount: challenge.stake, availableBefore: opponentWallet.availableKes, availableAfter: opponentWallet.availableKes - challenge.stake, reservedBefore: opponentWallet.reservedKes, reservedAfter: opponentWallet.reservedKes + challenge.stake, idempotencyKey: `challenge:${challenge.id}:accept:${ctx.user.id}`, reason: `Reserved KES ${challenge.stake} to accept challenge #${challenge.id}.` });
         await tx.update(challenges).set({ status: "accepted", opponentId: ctx.user.id, acceptedAt: now }).where(eq(challenges.id, challenge.id));
         const matchId = insertId(await tx.insert(matches).values({ challengeId: challenge.id, status: "AWAITING_STAKES", acceptedAt: now, stakesReservedAt: now, readyDeadline: new Date(now.getTime() + READY_WINDOW_MS) }));
         await tx.insert(matchStateEvents).values({ matchId, fromState: "ACCEPTED", toState: "AWAITING_STAKES", actorUserId: ctx.user.id, reason: `Challenge #${challenge.id} accepted; the participants' stakes are reserved.` });
@@ -392,7 +495,7 @@ export const arenaRouter = router({
           { matchId, userId: ctx.user.id, side: "away", stake: challenge.stake },
         ]);
         await notify(tx, challenge.creatorId, "challenge_accepted", "Challenge accepted", `Your ${GAME_LABELS[challenge.game]} challenge is matched. Confirm the terms and get ready.`, "match", matchId);
-        await notify(tx, ctx.user.id, "stake_reserved", "Stake reserved", `${challenge.stake} demo credits are reserved. Review the terms in your private match room.`, "match", matchId);
+        await notify(tx, ctx.user.id, "stake_reserved", "Stake reserved", `KES ${challenge.stake} is reserved. Review the terms in your private match room.`, "match", matchId);
         return { matchId };
       });
     }),
@@ -404,12 +507,7 @@ export const arenaRouter = router({
         const challenge = rows[0];
         if (!challenge || challenge.status !== "open") notFound();
         if (challenge.opponentId !== ctx.user.id) forbidden("Only the intended recipient can decline a direct invitation.");
-        const owner = await lockWallet(tx, challenge.creatorId);
-        if (owner.reservedCredits < challenge.stake) throw new Error("Reserved challenge stake invariant failed");
-        const availableAfter = owner.availableCredits + challenge.stake;
-        const reservedAfter = owner.reservedCredits - challenge.stake;
-        await tx.update(walletAccounts).set({ availableCredits: availableAfter, reservedCredits: reservedAfter }).where(eq(walletAccounts.userId, challenge.creatorId));
-        await ledger(tx, { userId: challenge.creatorId, transactionType: "cancellation_refund", amount: challenge.stake, availableBefore: owner.availableCredits, availableAfter, reservedBefore: owner.reservedCredits, reservedAfter, idempotencyKey: `challenge:${challenge.id}:decline`, reason: `Direct challenge #${challenge.id} declined by its invited player; creator's reservation returned.` });
+        await refundOpenChallenge(tx, challenge, `challenge:${challenge.id}:decline`, `Direct challenge #${challenge.id} declined by its invited player; creator's reservation returned.`);
         await tx.update(challenges).set({ status: "rejected" }).where(eq(challenges.id, challenge.id));
         await notify(tx, challenge.creatorId, "challenge_rejected", "Direct challenge declined", `Your invitation to challenge #${challenge.id} was declined. Its reserved stake was returned.`, "challenge", challenge.id);
         return { success: true };
@@ -423,12 +521,9 @@ export const arenaRouter = router({
         const challenge = rows[0];
         if (!challenge) notFound();
         if (challenge.creatorId !== ctx.user.id || challenge.status !== "open") forbidden("Only the owner may cancel an open challenge.");
-        const wallet = await lockWallet(tx, ctx.user.id);
-        if (wallet.reservedCredits < challenge.stake) throw new Error("Reserved challenge stake invariant failed");
-        await tx.update(walletAccounts).set({ availableCredits: wallet.availableCredits + challenge.stake, reservedCredits: wallet.reservedCredits - challenge.stake }).where(eq(walletAccounts.userId, ctx.user.id));
-        await ledger(tx, { userId: ctx.user.id, transactionType: "cancellation_refund", amount: challenge.stake, availableBefore: wallet.availableCredits, availableAfter: wallet.availableCredits + challenge.stake, reservedBefore: wallet.reservedCredits, reservedAfter: wallet.reservedCredits - challenge.stake, idempotencyKey: `challenge:${challenge.id}:cancel`, reason: `Open challenge #${challenge.id} cancelled; creator's reservation released.` });
+        await refundOpenChallenge(tx, challenge, `challenge:${challenge.id}:cancel`, `Open challenge #${challenge.id} cancelled; creator's reservation released.`);
         await tx.update(challenges).set({ status: "cancelled" }).where(eq(challenges.id, challenge.id));
-        await notify(tx, ctx.user.id, "challenge_cancelled", "Challenge cancelled", "Your stake reservation has been returned to your available demo balance.", "challenge", challenge.id);
+        await notify(tx, ctx.user.id, "challenge_cancelled", "Challenge cancelled", challenge.stakeCurrency === "KES" ? `Your KES ${challenge.stake} reservation has been returned.` : "Your historical demo reservation has been returned.", "challenge", challenge.id);
         if (challenge.opponentId) await notify(tx, challenge.opponentId, "challenge_cancelled", "Challenge invitation cancelled", `Challenge #${challenge.id} was cancelled by its creator.`, "challenge", challenge.id);
         return { success: true };
       });
@@ -444,24 +539,13 @@ export const arenaRouter = router({
       return { ...publicChallenge, isOwner: creatorId === ctx.user.id, isDirectInvitation: opponentId !== null, isInvitationForYou: opponentId === ctx.user.id && row.challenge.status === "open", inviteTarget: inviteeProfile?.username ?? null, creator: { username: row.creatorProfile.username, avatarColor: row.creatorProfile.avatarColor, availability: row.creatorProfile.availability } };
     }),
   }),
-  wallet: router({
-    summary: protectedProcedure.query(async ({ ctx }) => {
-      const db = await database();
-      const rows = await db.select().from(walletAccounts).where(eq(walletAccounts.userId, ctx.user.id)).limit(1);
-      return rows[0] ?? { userId: ctx.user.id, availableCredits: 0, reservedCredits: 0 };
-    }),
-    history: protectedProcedure.input(z.object({ limit: z.number().int().min(1).max(100).default(30) }).optional()).query(async ({ ctx, input }) => {
-      const db = await database();
-      return db.select().from(walletTransactions).where(eq(walletTransactions.userId, ctx.user.id)).orderBy(desc(walletTransactions.createdAt)).limit(input?.limit ?? 30);
-    }),
-  }),
   matches: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const db = await database();
       const rows = await db.select({ match: matches, participant: matchParticipants, challenge: challenges }).from(matchParticipants).innerJoin(matches, eq(matches.id, matchParticipants.matchId)).innerJoin(challenges, eq(challenges.id, matches.challengeId)).where(eq(matchParticipants.userId, ctx.user.id)).orderBy(desc(matches.createdAt)).limit(100);
       return Promise.all(rows.map(async row => {
         const opponents = await db.select({ username: profiles.username, avatarColor: profiles.avatarColor }).from(matchParticipants).innerJoin(profiles, eq(profiles.userId, matchParticipants.userId)).where(and(eq(matchParticipants.matchId, row.match.id), ne(matchParticipants.userId, ctx.user.id))).limit(1);
-        return { ...row.match, game: row.challenge.game, edition: row.challenge.edition, platform: row.challenge.platform, stake: row.challenge.stake, opponent: opponents[0] ?? null };
+        return { ...row.match, game: row.challenge.game, edition: row.challenge.edition, platform: row.challenge.platform, stake: row.challenge.stake, stakeCurrency: row.challenge.stakeCurrency, opponent: opponents[0] ?? null };
       }));
     }),
     details: protectedProcedure.input(z.object({ id: z.number().int().positive() })).query(async ({ ctx, input }) => {
@@ -475,6 +559,10 @@ export const arenaRouter = router({
       const isAdmin = ctx.user.role === "admin";
       const codes = await db.select().from(matchCodes).where(eq(matchCodes.matchId, input.id));
       const evidence = await db.select().from(matchEvidence).where(eq(matchEvidence.matchId, input.id));
+      const recordingRows = await db.select({ id: matchRecordings.id, userId: matchRecordings.userId, mimeType: matchRecordings.mimeType, sizeBytes: matchRecordings.sizeBytes, uploadedAt: matchRecordings.uploadedAt, expiresAt: matchRecordings.expiresAt, username: profiles.username, side: matchParticipants.side })
+        .from(matchRecordings).innerJoin(profiles, eq(profiles.userId, matchRecordings.userId))
+        .innerJoin(matchParticipants, and(eq(matchParticipants.matchId, matchRecordings.matchId), eq(matchParticipants.userId, matchRecordings.userId)))
+        .where(eq(matchRecordings.matchId, input.id));
       const activeEvidence = evidence.map(item => {
         const owner = participantByUser.get(item.userId);
         return { id: item.id, side: owner?.participant.side, username: owner?.username ?? "Participant", isMine: item.userId === ctx.user.id, mimeType: item.mimeType, sizeBytes: item.sizeBytes, scoreFor: item.scoreFor, scoreAgainst: item.scoreAgainst, comments: item.comments, submittedAt: item.submittedAt, url: `/api/evidence/${item.id}` };
@@ -491,12 +579,14 @@ export const arenaRouter = router({
         platform: data.challenge.platform,
         platformLabel: PLATFORM_LABELS[data.challenge.platform],
         stake: data.challenge.stake,
+        stakeCurrency: data.challenge.stakeCurrency,
         matchMinutes: data.challenge.matchMinutes,
         settings: data.challenge.settings,
         description: data.challenge.description,
         participants: participants.map(row => ({ side: row.participant.side, stake: row.participant.stake, readyAt: row.participant.readyAt, scoreFor: row.participant.scoreFor, scoreAgainst: row.participant.scoreAgainst, isMe: row.participant.userId === ctx.user.id, ...(isAdmin ? { userId: row.participant.userId } : {}), username: row.username, avatarColor: row.avatarColor, platform: row.platform, game: row.game, edition: row.edition })),
         codes: codes.map(code => ({ id: code.id, side: participantByUser.get(code.userId)?.participant.side, isMine: code.userId === ctx.user.id, code: code.code, updatedAt: code.updatedAt })),
         evidence: activeEvidence,
+        recordings: recordingRows.map(recording => ({ id: recording.id, username: recording.username, side: recording.side, mimeType: recording.mimeType, sizeBytes: recording.sizeBytes, uploadedAt: recording.uploadedAt, expiresAt: recording.expiresAt, isMine: recording.userId === ctx.user.id, ...((recording.userId === ctx.user.id || (isAdmin && data.match.status === "UNDER_REVIEW")) ? { url: `/api/match-recordings/${recording.id}` } : {}) })),
         disputes: disputeRows.map(dispute => ({ id: dispute.id, reason: dispute.reason, explanation: dispute.explanation, status: dispute.status, administrativeNotes: dispute.administrativeNotes, resolutionReason: dispute.resolutionReason, resolvedAt: dispute.resolvedAt, createdAt: dispute.createdAt, isMine: dispute.openedBy === ctx.user.id, attachments: privateAttachments.filter(attachment => attachment.disputeId === dispute.id).map(attachment => ({ id: attachment.id, mimeType: attachment.mimeType, sizeBytes: attachment.sizeBytes, createdAt: attachment.createdAt, url: `/api/dispute-evidence/${attachment.id}` })) })),
         stateHistory: stateHistory.map(event => ({ fromState: event.fromState, toState: event.toState, reason: event.reason, createdAt: event.createdAt })),
       };
@@ -554,6 +644,7 @@ export const arenaRouter = router({
         const now = new Date();
         const deadline = new Date(now.getTime() + EVIDENCE_WINDOW_MS);
         await transitionMatch(tx, match, "AWAITING_EVIDENCE", { reportedEndAt: now, evidenceDeadline: deadline }, ctx.user.id, "A participant reported the match finished; the five-minute server evidence window began.");
+        await tx.update(matchRecordings).set({ expiresAt: deadline }).where(eq(matchRecordings.matchId, input.id));
         for (const person of participants) await notify(tx, person.userId, "evidence_deadline", "Five-minute evidence window", "Submit your final-score screenshot and reported score before the server deadline.", "match", input.id);
         return { success: true, evidenceDeadline: deadline };
       });
@@ -596,6 +687,7 @@ export const arenaRouter = router({
           if (!reportsAgree) {
             const reason = "Participants submitted conflicting final-score reports. Settlement is frozen for human review.";
             await transitionMatch(tx, match, "UNDER_REVIEW", { disputeReason: reason }, null, reason);
+            await tx.update(matchRecordings).set({ expiresAt: null }).where(eq(matchRecordings.matchId, input.id));
             const duplicate = await tx.select().from(disputes).where(and(eq(disputes.matchId, input.id), eq(disputes.status, "OPEN"))).limit(1);
             if (!duplicate.length) await tx.insert(disputes).values({ matchId: input.id, openedBy: ctx.user.id, reason: "conflicting_scores", explanation: reason, status: "OPEN" });
             for (const person of participants) await notify(tx, person.userId, "match_under_review", "Result under review", "Score reports do not agree. Stakes remain reserved while an administrator reviews the match.", "match", input.id);
@@ -635,6 +727,7 @@ export const arenaRouter = router({
         if (existing.length) throw new TRPCError({ code: "CONFLICT", message: "An active dispute already exists for this match." });
         const id = insertId(await tx.insert(disputes).values({ matchId: input.id, openedBy: ctx.user.id, reason: input.reason, explanation: input.explanation, status: "OPEN" }));
         if (match.status !== "UNDER_REVIEW") await transitionMatch(tx, match, "UNDER_REVIEW", { disputeReason: input.explanation.slice(0, 500) }, ctx.user.id, `Participant dispute opened: ${input.reason}.`);
+        await tx.update(matchRecordings).set({ expiresAt: null }).where(eq(matchRecordings.matchId, input.id));
         if (attachmentBytes && input.mimeType) {
           const storageKey = await storePrivateEvidence(input.id, attachmentBytes, input.mimeType);
           await tx.insert(disputeAttachments).values({ disputeId: id, userId: ctx.user.id, storageKey, mimeType: input.mimeType, sizeBytes: attachmentBytes.length });
@@ -677,30 +770,29 @@ export const arenaRouter = router({
     settings: adminProcedure.query(async () => {
       const db = await database();
       const settings = await getPlatformSettings(db);
+      const walletConfig = getKesWalletConfig();
       return {
-        challengeCreationEnabled: settings.challengeCreationEnabled === 1,
-        minimumStake: settings.minimumStake,
-        maximumStake: settings.maximumStake,
+        challengeCreationEnabled: settings.challengeCreationEnabled === 1 && isKesWageringEnabled(),
+        walletEnabled: Boolean(walletConfig),
+        wageringEnabled: isKesWageringEnabled(),
+        minimumStake: walletConfig?.minStake ?? null,
+        maximumStake: walletConfig?.maxStake ?? null,
         defaultMatchMinutes: settings.defaultMatchMinutes,
         maintenanceNotice: settings.maintenanceNotice,
       };
     }),
     updateSettings: adminProcedure.input(z.object({
       challengeCreationEnabled: z.boolean(),
-      minimumStake: z.number().int().min(STAKE_MIN).max(STAKE_MAX),
-      maximumStake: z.number().int().min(STAKE_MIN).max(STAKE_MAX),
       defaultMatchMinutes: z.number().int().min(6).max(30),
       maintenanceNotice: z.string().trim().max(400).nullable(),
       reason: z.string().trim().min(10).max(2000),
-    }).refine(value => value.minimumStake <= value.maximumStake, { path: ["maximumStake"], message: "Maximum stake must be at least the minimum stake." })).mutation(async ({ ctx, input }) => {
+    })).mutation(async ({ ctx, input }) => {
       limitUserAction(ctx, "admin_platform_settings", 20);
       const db = await database();
       return db.transaction(async tx => {
         const current = await getPlatformSettings(tx, true);
         const values = {
           challengeCreationEnabled: input.challengeCreationEnabled ? 1 : 0,
-          minimumStake: input.minimumStake,
-          maximumStake: input.maximumStake,
           defaultMatchMinutes: input.defaultMatchMinutes,
           maintenanceNotice: input.maintenanceNotice || null,
           updatedBy: ctx.user.id,
@@ -714,8 +806,8 @@ export const arenaRouter = router({
           entityId: 1,
           reason: input.reason,
           details: JSON.stringify({
-            from: { challengeCreationEnabled: current.challengeCreationEnabled === 1, minimumStake: current.minimumStake, maximumStake: current.maximumStake, defaultMatchMinutes: current.defaultMatchMinutes, maintenanceNotice: current.maintenanceNotice },
-            to: { challengeCreationEnabled: input.challengeCreationEnabled, minimumStake: input.minimumStake, maximumStake: input.maximumStake, defaultMatchMinutes: input.defaultMatchMinutes, maintenanceNotice: input.maintenanceNotice || null },
+            from: { challengeCreationEnabled: current.challengeCreationEnabled === 1, defaultMatchMinutes: current.defaultMatchMinutes, maintenanceNotice: current.maintenanceNotice },
+            to: { challengeCreationEnabled: input.challengeCreationEnabled, defaultMatchMinutes: input.defaultMatchMinutes, maintenanceNotice: input.maintenanceNotice || null },
           }),
         });
         return { success: true };
@@ -723,14 +815,15 @@ export const arenaRouter = router({
     }),
     overview: adminProcedure.query(async () => {
       const db = await database();
-      const [underReview, openDisputes, recentAudit, accounts, recentTransactions] = await Promise.all([
+      const [underReview, openDisputes, recentAudit, accounts, recentTransactions, historicalDemoTransactions] = await Promise.all([
         db.select().from(matches).where(eq(matches.status, "UNDER_REVIEW")).orderBy(desc(matches.createdAt)).limit(50),
         db.select().from(disputes).where(inArray(disputes.status, ["OPEN", "INVESTIGATING"])).orderBy(desc(disputes.createdAt)).limit(50),
         db.select().from(adminAuditLogs).orderBy(desc(adminAuditLogs.createdAt)).limit(30),
-        db.select({ userId: profiles.userId, username: profiles.username, country: profiles.country, availability: profiles.availability, eligibility: profiles.eligibility, role: users.role, createdAt: profiles.createdAt, availableCredits: walletAccounts.availableCredits, reservedCredits: walletAccounts.reservedCredits }).from(profiles).innerJoin(users, eq(users.id, profiles.userId)).innerJoin(walletAccounts, eq(walletAccounts.userId, profiles.userId)).orderBy(desc(profiles.createdAt)).limit(200),
+        db.select({ userId: profiles.userId, username: profiles.username, country: profiles.country, availability: profiles.availability, eligibility: profiles.eligibility, cashWalletStatus: profiles.cashWalletStatus, role: users.role, createdAt: profiles.createdAt, availableKes: kesWalletAccounts.availableKes, reservedKes: kesWalletAccounts.reservedKes, frozen: kesWalletAccounts.frozen, freezeReason: kesWalletAccounts.freezeReason }).from(profiles).innerJoin(users, eq(users.id, profiles.userId)).leftJoin(kesWalletAccounts, eq(kesWalletAccounts.userId, profiles.userId)).orderBy(desc(profiles.createdAt)).limit(200),
+        db.select({ username: profiles.username, transaction: kesWalletTransactions }).from(kesWalletTransactions).innerJoin(profiles, eq(profiles.userId, kesWalletTransactions.userId)).orderBy(desc(kesWalletTransactions.createdAt)).limit(100),
         db.select({ username: profiles.username, transaction: walletTransactions }).from(walletTransactions).innerJoin(profiles, eq(profiles.userId, walletTransactions.userId)).orderBy(desc(walletTransactions.createdAt)).limit(100),
       ]);
-      return { underReview, openDisputes, recentAudit, accounts, recentTransactions };
+      return { underReview, openDisputes, recentAudit, accounts, recentTransactions, historicalDemoTransactions };
     }),
     disputes: adminProcedure.query(async () => {
       const db = await database();
@@ -755,6 +848,7 @@ export const arenaRouter = router({
           await settleScores(tx, match.id, participants, winner ?? null, `Administrative resolution: ${input.reason}`, ctx.user.id);
         }
         await tx.update(disputes).set({ status: "RESOLVED", resolutionReason: input.reason, resolvedBy: ctx.user.id, resolvedAt: new Date() }).where(eq(disputes.id, dispute.id));
+        await tx.update(matchRecordings).set({ expiresAt: new Date(Date.now() + EVIDENCE_WINDOW_MS) }).where(eq(matchRecordings.matchId, match.id));
         await tx.insert(adminAuditLogs).values({ adminUserId: ctx.user.id, action: "resolve_dispute", entityType: "dispute", entityId: dispute.id, reason: input.reason, details: JSON.stringify({ decision: input.decision, matchId: match.id }) });
         return { success: true };
       });
@@ -777,6 +871,7 @@ export const arenaRouter = router({
           administrativeNotes: input.reason,
           ...(input.status === "REJECTED" ? { resolutionReason: input.reason, resolvedBy: ctx.user.id, resolvedAt: new Date() } : {}),
         }).where(eq(disputes.id, input.id));
+        if (input.status === "REJECTED") await tx.update(matchRecordings).set({ expiresAt: new Date(Date.now() + EVIDENCE_WINDOW_MS) }).where(eq(matchRecordings.matchId, match.id));
         await tx.insert(adminAuditLogs).values({ adminUserId: ctx.user.id, action: input.status === "REJECTED" ? "reject_dispute_refund_match" : "investigate_dispute", entityType: "dispute", entityId: input.id, reason: input.reason, details: JSON.stringify({ matchId: match.id }) });
         for (const person of participants) {
           await notify(tx, person.userId, "dispute_updated", input.status === "REJECTED" ? "Dispute rejected" : "Dispute investigation started", input.reason, "dispute", input.id);
@@ -817,24 +912,11 @@ export const arenaRouter = router({
     }),
     matchLedger: adminProcedure.input(z.object({ matchId: z.number().int().positive() })).query(async ({ input }) => {
       const db = await database();
-      return db.select({ username: profiles.username, transaction: walletTransactions }).from(walletTransactions).innerJoin(profiles, eq(profiles.userId, walletTransactions.userId)).where(eq(walletTransactions.matchId, input.matchId)).orderBy(desc(walletTransactions.createdAt));
-    }),
-    adjustCredits: adminProcedure.input(z.object({ userId: z.number().int().positive(), delta: z.number().int().min(-10000).max(10000).refine(value => value !== 0), idempotencyKey: z.string().uuid(), reason: z.string().trim().min(10).max(2000) })).mutation(async ({ ctx, input }) => {
-      limitUserAction(ctx, "admin_credits", 20);
-      const db = await database();
-      return db.transaction(async tx => {
-        const wallet = await lockWallet(tx, input.userId);
-        const key = `admin-adjustment:${input.idempotencyKey}`;
-        const existing = await tx.select({ id: walletTransactions.id }).from(walletTransactions).where(and(eq(walletTransactions.userId, input.userId), eq(walletTransactions.idempotencyKey, key))).limit(1);
-        if (existing.length) return { success: true, duplicate: true };
-        const availableAfter = wallet.availableCredits + input.delta;
-        if (availableAfter < 0 || availableAfter > 1_000_000) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Adjustment would exceed the permitted demo balance range." });
-        await tx.update(walletAccounts).set({ availableCredits: availableAfter }).where(eq(walletAccounts.userId, input.userId));
-        await ledger(tx, { userId: input.userId, transactionType: "admin_adjustment", amount: Math.abs(input.delta), availableBefore: wallet.availableCredits, availableAfter, reservedBefore: wallet.reservedCredits, reservedAfter: wallet.reservedCredits, idempotencyKey: key, reason: input.reason });
-        await tx.insert(adminAuditLogs).values({ adminUserId: ctx.user.id, action: "adjust_demo_credits", entityType: "user", entityId: input.userId, reason: input.reason, details: JSON.stringify({ delta: input.delta, availableBefore: wallet.availableCredits, availableAfter }) });
-        await notify(tx, input.userId, "wallet_adjustment", "Demo wallet adjusted", `An administrator adjusted your demo-credit balance by ${input.delta > 0 ? "+" : ""}${input.delta}. Review your ledger for the reason.`, "wallet", input.userId);
-        return { success: true, duplicate: false };
-      });
+      const [kes, historicalDemo] = await Promise.all([
+        db.select({ username: profiles.username, transaction: kesWalletTransactions }).from(kesWalletTransactions).innerJoin(profiles, eq(profiles.userId, kesWalletTransactions.userId)).where(eq(kesWalletTransactions.matchId, input.matchId)).orderBy(desc(kesWalletTransactions.createdAt)),
+        db.select({ username: profiles.username, transaction: walletTransactions }).from(walletTransactions).innerJoin(profiles, eq(profiles.userId, walletTransactions.userId)).where(eq(walletTransactions.matchId, input.matchId)).orderBy(desc(walletTransactions.createdAt)),
+      ]);
+      return { kes, historicalDemo };
     }),
     audit: adminProcedure.query(async () => {
       const db = await database();
@@ -855,14 +937,9 @@ export async function processMatchTimeouts() {
         const rows = await tx.select().from(challenges).where(eq(challenges.id, challenge.id)).for("update").limit(1);
         const current = rows[0];
         if (!current || current.status !== "open" || current.expiresAt.getTime() > Date.now()) return;
-        const wallet = await lockWallet(tx, current.creatorId);
-        if (wallet.reservedCredits < current.stake) throw new Error("Challenge stake reservation invariant failed");
-        const availableAfter = wallet.availableCredits + current.stake;
-        const reservedAfter = wallet.reservedCredits - current.stake;
-        await tx.update(walletAccounts).set({ availableCredits: availableAfter, reservedCredits: reservedAfter }).where(eq(walletAccounts.userId, current.creatorId));
-        await ledger(tx, { userId: current.creatorId, transactionType: "cancellation_refund", amount: current.stake, availableBefore: wallet.availableCredits, availableAfter, reservedBefore: wallet.reservedCredits, reservedAfter, idempotencyKey: `challenge:${current.id}:expire`, reason: `Challenge #${current.id} expired; reservation released.` });
+        await refundOpenChallenge(tx, current, `challenge:${current.id}:expire`, `Challenge #${current.id} expired; reservation released.`);
         await tx.update(challenges).set({ status: "expired" }).where(eq(challenges.id, current.id));
-        await notify(tx, current.creatorId, "challenge_expired", "Challenge expired", "The invitation expired and your demo stake was released.", "challenge", current.id);
+        await notify(tx, current.creatorId, "challenge_expired", "Challenge expired", current.stakeCurrency === "KES" ? `KES ${current.stake} was released from your reservation.` : "Your historic demo reservation was released.", "challenge", current.id);
         if (current.opponentId) await notify(tx, current.opponentId, "challenge_expired", "Challenge invitation expired", `Challenge #${current.id} expired before you accepted it.`, "challenge", current.id);
       });
     } catch (error) { console.error("[Pace Arena timeout] Challenge expiry failed:", error instanceof Error ? error.message : "unknown error"); }
@@ -889,6 +966,7 @@ export async function processMatchTimeouts() {
         if (!current || current.status !== "IN_PROGRESS" || !current.expectedEndAt || current.expectedEndAt.getTime() > Date.now()) return;
         const deadline = new Date(Date.now() + EVIDENCE_WINDOW_MS);
         await transitionMatch(tx, current, "AWAITING_EVIDENCE", { reportedEndAt: now, evidenceDeadline: deadline }, null, "The server match timer ended; the five-minute evidence window began.");
+        await tx.update(matchRecordings).set({ expiresAt: deadline }).where(eq(matchRecordings.matchId, match.id));
         const participants = await getParticipants(tx, match.id);
         for (const person of participants) await notify(tx, person.userId, "evidence_deadline", "Five-minute evidence window", "The server match timer ended. Submit final-score screenshot evidence before the deadline.", "match", match.id);
       });
@@ -920,10 +998,16 @@ export async function processMatchTimeouts() {
         const evidence = await tx.select().from(matchEvidence).where(eq(matchEvidence.matchId, match.id));
         const reason = evidence.length === 0 ? "Neither participant submitted evidence before the five-minute deadline; no automatic winner is awarded." : "One participant did not submit evidence before the five-minute deadline; preserve submitted evidence for a reasoned review.";
         await transitionMatch(tx, current, "UNDER_REVIEW", { disputeReason: reason }, null, reason);
+        await tx.update(matchRecordings).set({ expiresAt: null }).where(eq(matchRecordings.matchId, match.id));
         const existing = await tx.select().from(disputes).where(and(eq(disputes.matchId, match.id), inArray(disputes.status, ["OPEN", "INVESTIGATING"]))).limit(1);
         if (!existing.length) await tx.insert(disputes).values({ matchId: match.id, openedBy: participants[0].userId, reason: "missing_evidence", explanation: reason, status: "OPEN" });
         for (const person of participants) await notify(tx, person.userId, "match_under_review", "Evidence deadline reached", reason, "match", match.id);
       });
     } catch (error) { console.error("[Pace Arena timeout] Evidence deadline processing failed:", error instanceof Error ? error.message : "unknown error"); }
+  }
+  try {
+    await cleanupExpiredMatchRecordings(db, now);
+  } catch (error) {
+    console.error("[Pace Arena timeout] Recording cleanup failed:", error instanceof Error ? error.message : "unknown error");
   }
 }

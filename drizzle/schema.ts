@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   check,
+  customType,
   index,
   int,
   mysqlEnum,
@@ -12,6 +13,7 @@ import {
 } from "drizzle-orm/mysql-core";
 
 const matchStateValues = ["DRAFT", "OPEN", "ACCEPTED", "AWAITING_STAKES", "READY", "IN_PROGRESS", "AWAITING_EVIDENCE", "UNDER_REVIEW", "COMPLETED", "DRAWN", "CANCELLED", "REFUNDED"] as const;
+const longBlob = customType<{ data: Buffer; driverData: Buffer }>({ dataType: () => "longblob" });
 
 /** OAuth-compatible identity table retained from the managed starter. */
 export const users = mysqlTable("users", {
@@ -62,10 +64,11 @@ export const profiles = mysqlTable("profiles", {
   generalLocation: varchar("generalLocation", { length: 80 }),
   availability: mysqlEnum("availability", ["available", "away"]).default("away").notNull(),
   eligibility: mysqlEnum("eligibility", ["eligible", "review", "suspended"]).default("eligible").notNull(),
+  cashWalletStatus: mysqlEnum("cashWalletStatus", ["unverified", "pending", "verified", "rejected"]).default("unverified").notNull(),
   matchPreferences: text("matchPreferences"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-});
+}, table => ({ cashWalletStatusIdx: index("profile_cash_wallet_status_idx").on(table.cashWalletStatus) }));
 
 export const walletAccounts = mysqlTable("wallet_accounts", {
   userId: int("userId").primaryKey().references(() => users.id, { onDelete: "cascade" }),
@@ -86,6 +89,7 @@ export const challenges = mysqlTable("challenges", {
   edition: varchar("edition", { length: 48 }).notNull(),
   platform: mysqlEnum("platform", ["android", "ios", "pc", "ps4", "ps5", "xbox_one", "xbox_series", "switch"]).notNull(),
   stake: int("stake").notNull(),
+  stakeCurrency: mysqlEnum("stakeCurrency", ["DEMO", "KES"]).default("DEMO").notNull(),
   matchMinutes: int("matchMinutes").default(12).notNull(),
   settings: text("settings"),
   description: varchar("description", { length: 500 }),
@@ -170,6 +174,92 @@ export const walletTransactions = mysqlTable("wallet_transactions", {
   reservedAfterNonnegative: check("wallet_tx_reserved_after_nonnegative", sql`${table.reservedAfter} >= 0`),
 }));
 
+export const kesWalletAccounts = mysqlTable("kes_wallet_accounts", {
+  userId: int("userId").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  walletReference: varchar("walletReference", { length: 40 }),
+  availableKes: int("availableKes").default(0).notNull(),
+  reservedKes: int("reservedKes").default(0).notNull(),
+  frozen: int("frozen").default(0).notNull(),
+  freezeReason: varchar("freezeReason", { length: 500 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, table => ({
+  walletReferenceUnique: uniqueIndex("kes_wallet_reference_unique").on(table.walletReference),
+  availableNonnegative: check("kes_wallet_available_nonnegative", sql`${table.availableKes} >= 0`),
+  reservedNonnegative: check("kes_wallet_reserved_nonnegative", sql`${table.reservedKes} >= 0`),
+  frozenFlag: check("kes_wallet_frozen_flag", sql`${table.frozen} IN (0, 1)`),
+}));
+
+export const kesWithdrawalRequests = mysqlTable("kes_withdrawal_requests", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull().references(() => users.id),
+  idempotencyKey: varchar("idempotencyKey", { length: 128 }).notNull(),
+  amountKes: int("amountKes").notNull(),
+  phoneE164: varchar("phoneE164", { length: 16 }).notNull(),
+  status: mysqlEnum("status", ["pending", "paid", "rejected"]).default("pending").notNull(),
+  payoutReceipt: varchar("payoutReceipt", { length: 64 }),
+  actualAmountKes: int("actualAmountKes"),
+  reviewReason: varchar("reviewReason", { length: 2000 }),
+  requestedAt: timestamp("requestedAt").defaultNow().notNull(),
+  processedAt: timestamp("processedAt"),
+  processedBy: int("processedBy").references(() => users.id),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, table => ({
+  userIdempotencyUnique: uniqueIndex("kes_withdrawal_user_idempotency_unique").on(table.userId, table.idempotencyKey),
+  ownerIdx: index("kes_withdrawal_owner_idx").on(table.userId, table.requestedAt),
+  statusIdx: index("kes_withdrawal_status_idx").on(table.status, table.requestedAt),
+  amountPositive: check("kes_withdrawal_amount_positive", sql`${table.amountKes} > 0`),
+}));
+
+export const kesWalletTransactions = mysqlTable("kes_wallet_transactions", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull().references(() => users.id),
+  challengeId: int("challengeId").references(() => challenges.id),
+  matchId: int("matchId").references(() => matches.id),
+  withdrawalRequestId: int("withdrawalRequestId").references(() => kesWithdrawalRequests.id),
+  transactionType: mysqlEnum("transactionType", ["partner_credit", "partner_reversal", "partner_reversal_review", "withdrawal_reservation", "withdrawal_paid", "withdrawal_release", "stake_reservation", "stake_release", "winner_reward", "draw_refund", "stake_consumption", "admin_adjustment"]).notNull(),
+  amountKes: int("amountKes").notNull(),
+  availableBeforeKes: int("availableBeforeKes").notNull(),
+  availableAfterKes: int("availableAfterKes").notNull(),
+  reservedBeforeKes: int("reservedBeforeKes").notNull(),
+  reservedAfterKes: int("reservedAfterKes").notNull(),
+  status: mysqlEnum("status", ["completed", "reserved", "released", "review"]).default("completed").notNull(),
+  idempotencyKey: varchar("idempotencyKey", { length: 128 }).notNull(),
+  reason: varchar("reason", { length: 1000 }).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => ({
+  idempotencyUnique: uniqueIndex("kes_wallet_tx_idempotency_unique").on(table.userId, table.idempotencyKey),
+  ownerIdx: index("kes_wallet_tx_owner_idx").on(table.userId, table.createdAt),
+  challengeIdx: index("kes_wallet_tx_challenge_idx").on(table.challengeId),
+  matchIdx: index("kes_wallet_tx_match_idx").on(table.matchId),
+  amountPositive: check("kes_wallet_tx_amount_positive", sql`${table.amountKes} > 0`),
+  availableBeforeNonnegative: check("kes_wallet_tx_available_before_nonnegative", sql`${table.availableBeforeKes} >= 0`),
+  availableAfterNonnegative: check("kes_wallet_tx_available_after_nonnegative", sql`${table.availableAfterKes} >= 0`),
+  reservedBeforeNonnegative: check("kes_wallet_tx_reserved_before_nonnegative", sql`${table.reservedBeforeKes} >= 0`),
+  reservedAfterNonnegative: check("kes_wallet_tx_reserved_after_nonnegative", sql`${table.reservedAfterKes} >= 0`),
+}));
+
+export const partnerCreditEvents = mysqlTable("partner_credit_events", {
+  id: int("id").autoincrement().primaryKey(),
+  eventId: varchar("eventId", { length: 128 }).notNull(),
+  transactionId: varchar("transactionId", { length: 128 }).notNull(),
+  eventType: mysqlEnum("eventType", ["credit", "reversal"]).default("credit").notNull(),
+  reversesTransactionId: varchar("reversesTransactionId", { length: 128 }),
+  userId: int("userId").notNull().references(() => users.id),
+  walletReference: varchar("walletReference", { length: 40 }).notNull(),
+  amountKes: int("amountKes").notNull(),
+  currency: varchar("currency", { length: 3 }).default("KES").notNull(),
+  status: mysqlEnum("status", ["credited", "reversed", "held_for_review", "dismissed"]).default("credited").notNull(),
+  partnerOccurredAt: timestamp("partnerOccurredAt"),
+  receivedAt: timestamp("receivedAt").defaultNow().notNull(),
+}, table => ({
+  eventUnique: uniqueIndex("partner_credit_event_unique").on(table.eventId),
+  transactionUnique: uniqueIndex("partner_credit_transaction_unique").on(table.transactionId),
+  reversalUnique: uniqueIndex("partner_credit_reversal_unique").on(table.reversesTransactionId),
+  ownerIdx: index("partner_credit_owner_idx").on(table.userId, table.receivedAt),
+  amountPositive: check("partner_credit_amount_positive", sql`${table.amountKes} > 0`),
+}));
+
 export const matchCodes = mysqlTable("match_codes", {
   id: int("id").autoincrement().primaryKey(),
   matchId: int("matchId").notNull().references(() => matches.id, { onDelete: "cascade" }),
@@ -196,6 +286,22 @@ export const matchEvidence = mysqlTable("match_evidence", {
   fileSize: check("match_evidence_file_size", sql`${table.sizeBytes} >= 64 AND ${table.sizeBytes} <= 5242880`),
   scoreForValid: check("match_evidence_score_for_valid", sql`${table.scoreFor} >= 0 AND ${table.scoreFor} <= 99`),
   scoreAgainstValid: check("match_evidence_score_against_valid", sql`${table.scoreAgainst} >= 0 AND ${table.scoreAgainst} <= 99`),
+}));
+
+export const matchRecordings = mysqlTable("match_video_recordings", {
+  id: int("id").autoincrement().primaryKey(),
+  matchId: int("matchId").notNull().references(() => matches.id),
+  userId: int("userId").notNull().references(() => users.id),
+  mimeType: mysqlEnum("mimeType", ["video/webm", "video/mp4", "video/quicktime"]).notNull(),
+  sizeBytes: int("sizeBytes").notNull(),
+  encryptedBytes: longBlob("encryptedBytes").notNull(),
+  uploadedAt: timestamp("uploadedAt").defaultNow().notNull(),
+  expiresAt: timestamp("expiresAt"),
+}, table => ({
+  submitterUnique: uniqueIndex("match_video_recording_user_unique").on(table.matchId, table.userId),
+  matchIdx: index("match_video_recording_match_idx").on(table.matchId),
+  expiryIdx: index("match_video_recording_expiry_idx").on(table.expiresAt),
+  fileSize: check("match_video_recording_size", sql`${table.sizeBytes} >= 64 AND ${table.sizeBytes} <= 33554432`),
 }));
 
 export const disputes = mysqlTable("disputes", {

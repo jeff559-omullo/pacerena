@@ -7,13 +7,13 @@ import { SpinnerButton } from "@/components/Primitives";
 type Mode = "login" | "register" | "forgot" | "reset";
 const headings: Record<Mode, { eyebrow: string; title: string; description: string }> = {
   login: { eyebrow: "PLAYER ACCESS", title: "Back for another?", description: "Sign in to pick up where the last whistle left off." },
-  register: { eyebrow: "CREATE YOUR PLAYER CARD", title: "Claim your spot.", description: "Create your account and start with 1,000 demo credits. No email confirmation required." },
+  register: { eyebrow: "CREATE YOUR PLAYER CARD", title: "Claim your spot.", description: "Create your account and enter immediately. KES wallet eligibility is handled separately; no demo balance is issued." },
   forgot: { eyebrow: "ACCOUNT RECOVERY", title: "Reset your password.", description: "If an account exists, we’ll send a short-lived recovery link." },
   reset: { eyebrow: "ACCOUNT RECOVERY", title: "Choose a new password.", description: "Use a fresh password you haven’t used on Pace Arena before." },
 };
 
 function AuthFrame({ children }: { children: React.ReactNode }) {
-  return <div className="auth-page"><aside className="auth-aside"><Link href="/" className="brand-lockup"><span className="brand-mark"><span /><span /><span /></span><span className="brand-name">PACE<span>ARENA</span></span></Link><div className="auth-quote"><div className="eyebrow"><span className="eyebrow-line" /> A BETTER WAY TO PLAY</div><h1>Your game.<br /><em>Your next fixture.</em></h1><p>Find a compatible opponent, agree on terms and take the match to your own device. No cash wagering. Demo credits only.</p></div><div className="auth-note">INDEPENDENT COMMUNITY PLATFORM · NOT AFFILIATED WITH GAME PUBLISHERS</div></aside><main className="auth-form-side"><section className="auth-form-card">{children}</section></main></div>;
+  return <div className="auth-page"><aside className="auth-aside"><Link href="/" className="brand-lockup"><span className="brand-mark"><span /><span /><span /></span><span className="brand-name">PACE<span>ARENA</span></span></Link><div className="auth-quote"><div className="eyebrow"><span className="eyebrow-line" /> A BETTER WAY TO PLAY</div><h1>Your game.<br /><em>Your next fixture.</em></h1><p>Find a compatible opponent, agree on match terms and take the match to your own device. When enabled, KES credits are purchased through the partner site; withdrawals are processed manually.</p></div><div className="auth-note">INDEPENDENT COMMUNITY PLATFORM · NOT AFFILIATED WITH GAME PUBLISHERS</div></aside><main className="auth-form-side"><section className="auth-form-card">{children}</section></main></div>;
 }
 
 export default function AuthPage({ mode }: { mode: Mode }) {
@@ -55,7 +55,7 @@ export default function AuthPage({ mode }: { mode: Mode }) {
       <SpinnerButton type="submit" busy={busy}>{mode === "login" ? "Sign in" : mode === "register" ? "Create account" : mode === "forgot" ? "Send reset link" : "Save new password"}<ArrowRight size={15} /></SpinnerButton>
     </form>}
     <div className="auth-switch">{mode === "login" ? <>New to the arena? <Link href="/register">Create an account</Link><div style={{ marginTop: 10 }}><Link href="/forgot-password">Forgot your password?</Link></div></> : mode === "register" ? <>Already registered? <Link href="/login">Sign in</Link></> : mode === "forgot" ? <>Remembered it? <Link href="/login">Back to sign in</Link></> : <>Return to <Link href="/login">sign in</Link></>}</div>
-    {mode === "register" && <div className="toast-demo-note" style={{ marginTop: 21, textAlign: "center", lineHeight: 1.6 }}>By registering you agree that demo credits have no monetary value and that player-submitted match evidence may require review.</div>}
+    {mode === "register" && <div className="field-help" style={{ marginTop: 21, textAlign: "center", lineHeight: 1.6 }}>Account access is immediate after registration. KES wallet and challenge features may be unavailable until verified server configuration is enabled. Match evidence is player-submitted and may require human review.</div>}
     <div style={{ marginTop: 24 }}><Link href="/" className="card-link"><ArrowLeft size={13} /> Back to Pace Arena</Link></div>
   </AuthFrame>;
 }

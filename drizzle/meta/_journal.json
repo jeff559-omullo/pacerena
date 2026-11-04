@@ -2,40 +2,12 @@
   "version": "7",
   "dialect": "mysql",
   "entries": [
-    {
-      "idx": 0,
-      "version": "5",
-      "when": 1788785580464,
-      "tag": "0000_initial_users",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "5",
-      "when": 1793221691982,
-      "tag": "0001_aberrant_korath",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "5",
-      "when": 1793222541363,
-      "tag": "0002_chemical_zodiak",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "5",
-      "when": 1793223062257,
-      "tag": "0003_curious_paibok",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "5",
-      "when": 1793225315137,
-      "tag": "0004_amused_firebrand",
-      "breakpoints": true
-    }
+    { "idx": 0, "version": "5", "when": 1788785580464, "tag": "0000_initial_users", "breakpoints": true },
+    { "idx": 1, "version": "5", "when": 1793221691982, "tag": "0001_aberrant_korath", "breakpoints": true },
+    { "idx": 2, "version": "5", "when": 1793222541363, "tag": "0002_chemical_zodiak", "breakpoints": true },
+    { "idx": 3, "version": "5", "when": 1793223062257, "tag": "0003_curious_paibok", "breakpoints": true },
+    { "idx": 4, "version": "5", "when": 1793225315137, "tag": "0004_amused_firebrand", "breakpoints": true },
+    { "idx": 5, "version": "5", "when": 1793621122030, "tag": "0005_match_video_recordings", "breakpoints": true },
+    { "idx": 6, "version": "5", "when": 1793783640000, "tag": "0006_kes_partner_wallet", "breakpoints": true }
   ]
 }

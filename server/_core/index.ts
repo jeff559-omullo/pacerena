@@ -7,12 +7,15 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { registerEvidenceRoutes } from "../evidence";
+import { registerMatchRecordingRoutes } from "../match-recordings";
+import { registerPartnerCreditRoute } from "../kes-wallet";
 import { processMatchTimeouts } from "../arena";
 
 async function startServer() {
   const app = express();
   app.set("trust proxy", 1);
   const server = createServer(app);
+  registerPartnerCreditRoute(app);
   app.use(express.json({ limit: "12mb" }));
   app.use(express.urlencoded({ limit: "12mb", extended: true }));
   app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
@@ -20,6 +23,7 @@ async function startServer() {
     res.set("Cache-Control", "no-store").type("application/javascript").send(publicPlatformScript());
   });
   registerEvidenceRoutes(app);
+  registerMatchRecordingRoutes(app);
   app.use("/api/trpc", (req, res, next) => {
     if (req.method === "POST" && req.get("x-pace-arena-request") !== "1") {
       res.status(403).json({ error: "Request origin could not be verified." });
