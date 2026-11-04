@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   check,
   customType,
+  foreignKey,
   index,
   int,
   mysqlEnum,
@@ -216,7 +217,7 @@ export const kesWalletTransactions = mysqlTable("kes_wallet_transactions", {
   userId: int("userId").notNull().references(() => users.id),
   challengeId: int("challengeId").references(() => challenges.id),
   matchId: int("matchId").references(() => matches.id),
-  withdrawalRequestId: int("withdrawalRequestId").references(() => kesWithdrawalRequests.id),
+  withdrawalRequestId: int("withdrawalRequestId"),
   transactionType: mysqlEnum("transactionType", ["partner_credit", "partner_reversal", "partner_reversal_review", "withdrawal_reservation", "withdrawal_paid", "withdrawal_release", "stake_reservation", "stake_release", "winner_reward", "draw_refund", "stake_consumption", "admin_adjustment"]).notNull(),
   amountKes: int("amountKes").notNull(),
   availableBeforeKes: int("availableBeforeKes").notNull(),
@@ -232,6 +233,7 @@ export const kesWalletTransactions = mysqlTable("kes_wallet_transactions", {
   ownerIdx: index("kes_wallet_tx_owner_idx").on(table.userId, table.createdAt),
   challengeIdx: index("kes_wallet_tx_challenge_idx").on(table.challengeId),
   matchIdx: index("kes_wallet_tx_match_idx").on(table.matchId),
+  withdrawalRequestFk: foreignKey({ name: "kes_wallet_tx_withdrawal_req_fk", columns: [table.withdrawalRequestId], foreignColumns: [kesWithdrawalRequests.id] }),
   amountPositive: check("kes_wallet_tx_amount_positive", sql`${table.amountKes} > 0`),
   availableBeforeNonnegative: check("kes_wallet_tx_available_before_nonnegative", sql`${table.availableBeforeKes} >= 0`),
   availableAfterNonnegative: check("kes_wallet_tx_available_after_nonnegative", sql`${table.availableAfterKes} >= 0`),
@@ -245,7 +247,7 @@ export const partnerCreditEvents = mysqlTable("partner_credit_events", {
   transactionId: varchar("transactionId", { length: 128 }).notNull(),
   eventType: mysqlEnum("eventType", ["credit", "reversal"]).default("credit").notNull(),
   reversesTransactionId: varchar("reversesTransactionId", { length: 128 }),
-  userId: int("userId").notNull().references(() => users.id),
+  userId: int("userId").notNull(),
   walletReference: varchar("walletReference", { length: 40 }).notNull(),
   amountKes: int("amountKes").notNull(),
   currency: varchar("currency", { length: 3 }).default("KES").notNull(),
@@ -257,6 +259,7 @@ export const partnerCreditEvents = mysqlTable("partner_credit_events", {
   transactionUnique: uniqueIndex("partner_credit_transaction_unique").on(table.transactionId),
   reversalUnique: uniqueIndex("partner_credit_reversal_unique").on(table.reversesTransactionId),
   ownerIdx: index("partner_credit_owner_idx").on(table.userId, table.receivedAt),
+  userFk: foreignKey({ name: "partner_credit_events_user_fk", columns: [table.userId], foreignColumns: [users.id] }),
   amountPositive: check("partner_credit_amount_positive", sql`${table.amountKes} > 0`),
 }));
 

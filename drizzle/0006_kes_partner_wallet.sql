@@ -116,6 +116,6 @@ ALTER TABLE `kes_wallet_transactions` ADD CONSTRAINT `kes_wallet_transactions_ch
 --> statement-breakpoint
 ALTER TABLE `kes_wallet_transactions` ADD CONSTRAINT `kes_wallet_transactions_matchId_matches_id_fk` FOREIGN KEY (`matchId`) REFERENCES `matches`(`id`) ON DELETE no action ON UPDATE no action;
 --> statement-breakpoint
-ALTER TABLE `kes_wallet_transactions` ADD CONSTRAINT `kes_wallet_transactions_withdrawalRequestId_kes_withdrawal_requests_id_fk` FOREIGN KEY (`withdrawalRequestId`) REFERENCES `kes_withdrawal_requests`(`id`) ON DELETE no action ON UPDATE no action;
+ALTER TABLE `kes_wallet_transactions` ADD CONSTRAINT `kes_wallet_tx_withdrawal_req_fk` FOREIGN KEY (`withdrawalRequestId`) REFERENCES `kes_withdrawal_requests`(`id`) ON DELETE no action ON UPDATE no action;
 --> statement-breakpoint
-ALTER TABLE `partner_credit_events` ADD CONSTRAINT `partner_credit_events_userId_users_id_fk` FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE no action ON UPDATE no action;
+ALTER TABLE `partner_credit_events` ADD CONSTRAINT `partner_credit_events_user_fk` FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE no action ON UPDATE no action;
