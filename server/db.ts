@@ -1,15 +1,51 @@
 import { and, eq, gt, isNull, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
+import mysql from "mysql2/promise";
 import { authSessions, emailAccounts, InsertUser, profiles, users } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
+function getPoolConfig() {
+  const connectionString = process.env.DATABASE_URL ?? ENV.databaseUrl;
+  if (!connectionString) return null;
+
+  try {
+    const parsed = new URL(connectionString);
+    const sslConfig = {
+      minVersion: "TLSv1.2",
+      rejectUnauthorized: true,
+    } as const;
+
+    return {
+      host: parsed.hostname,
+      port: Number(parsed.port || 4000),
+      user: decodeURIComponent(parsed.username),
+      password: decodeURIComponent(parsed.password),
+      database: decodeURIComponent(parsed.pathname.replace(/^\/+/, "")),
+      ssl: sslConfig,
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 0,
+    } satisfies mysql.PoolOptions;
+  } catch (error) {
+    console.warn("[Database] Invalid DATABASE_URL:", error instanceof Error ? error.message : "unknown error");
+    return null;
+  }
+}
+
 /** Lazily create the managed MySQL/Drizzle connection. */
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
-      _db = drizzle(process.env.DATABASE_URL);
+      const poolConfig = getPoolConfig();
+      if (!poolConfig) {
+        return null;
+      }
+      const pool = mysql.createPool(poolConfig) as any;
+      _db = drizzle({ client: pool as any }) as ReturnType<typeof drizzle>;
     } catch (error) {
       console.warn("[Database] Failed to connect:", error instanceof Error ? error.message : "unknown error");
       _db = null;
