@@ -5,6 +5,7 @@ import { sdk } from "./_core/sdk";
 import { listLLMModels } from "./_core/llm";
 import { generateImage } from "./_core/imageGeneration";
 import { COOKIE_NAME } from "../shared/const";
+import { challengeCreationAllowed } from "./arena";
 
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 describe("current platform integration", () => {
@@ -51,5 +52,9 @@ describe("current platform integration", () => {
     expect(await sdk.verifySession(token)).toMatchObject({ openId: "user-test" });
     vi.stubEnv("MANUS_PROJECT_ID", "different-project");
     expect(await sdk.verifySession(token)).toBeNull();
+  });
+  it("allows challenge creation when the force-KES override is enabled", () => {
+    expect(challengeCreationAllowed(0, { PACE_FORCE_KES: "true" })).toBe(true);
+    expect(challengeCreationAllowed(0, { PACE_FORCE_KES: "false" })).toBe(false);
   });
 });

@@ -56,7 +56,7 @@ function validatedPartnerUrl(value: string | undefined): string | null {
   }
 }
 
-function shouldForceKesFeatures(env: NodeJS.ProcessEnv = process.env): boolean {
+export function shouldForceKesFeatures(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.PACE_FORCE_KES === "true" || env.PACE_FORCE_KES_ENABLED === "true" || env.PACE_FORCE_FEATURES === "true";
 }
 

@@ -41,7 +41,7 @@ import { canViewChallengeDetails } from "./challenge-access";
 import { adminProcedure, protectedProcedure, router } from "./_core/trpc";
 import { storePrivateEvidence } from "./evidence";
 import { cleanupExpiredMatchRecordings } from "./match-recordings";
-import { ensureKesWalletAccount, getKesWalletConfig, isKesWageringEnabled } from "./kes-wallet";
+import { ensureKesWalletAccount, getKesWalletConfig, isKesWageringEnabled, shouldForceKesFeatures } from "./kes-wallet";
 
 const gameSchema = z.enum(["efootball", "ea_fc"]);
 const platformSchema = z.enum(["android", "ios", "pc", "ps4", "ps5", "xbox_one", "xbox_series", "switch"]);
@@ -51,6 +51,10 @@ async function database() {
   if (!db) throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "The Pace Arena database is unavailable." });
   return db;
 }
+export function challengeCreationAllowed(settingValue: number | null | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+  return settingValue === 1 || shouldForceKesFeatures(env);
+}
+
 async function getPlatformSettings(executor: any, lock = false) {
   const rows = lock
     ? await executor.select().from(platformSettings).where(eq(platformSettings.id, 1)).for("update").limit(1)
@@ -288,7 +292,7 @@ export const arenaRouter = router({
       const walletConfig = getKesWalletConfig();
       const wageringEnabled = isKesWageringEnabled();
       return {
-        challengeCreationEnabled: settings.challengeCreationEnabled === 1 && wageringEnabled,
+        challengeCreationEnabled: challengeCreationAllowed(settings.challengeCreationEnabled) && wageringEnabled,
         walletEnabled: Boolean(walletConfig),
         wageringEnabled,
         minimumStake: walletConfig?.minStake ?? STAKE_MIN,
@@ -417,7 +421,7 @@ export const arenaRouter = router({
       const db = await database();
       return db.transaction(async tx => {
         const arenaSettings = await getPlatformSettings(tx, true);
-        if (arenaSettings.challengeCreationEnabled !== 1) throw new TRPCError({ code: "PRECONDITION_FAILED", message: arenaSettings.maintenanceNotice || "New challenges are temporarily paused by an administrator." });
+        if (!challengeCreationAllowed(arenaSettings.challengeCreationEnabled)) throw new TRPCError({ code: "PRECONDITION_FAILED", message: arenaSettings.maintenanceNotice || "New challenges are temporarily paused by an administrator." });
         if (!validateStakeBounds(input.stake, walletConfig.minStake, walletConfig.maxStake)) throw new TRPCError({ code: "BAD_REQUEST", message: `Stake must be between KES ${walletConfig.minStake} and KES ${walletConfig.maxStake}.` });
         const matchMinutes = input.matchMinutes ?? arenaSettings.defaultMatchMinutes;
         const profile = await requireKesEligible(tx, ctx.user.id);
@@ -772,7 +776,7 @@ export const arenaRouter = router({
       const settings = await getPlatformSettings(db);
       const walletConfig = getKesWalletConfig();
       return {
-        challengeCreationEnabled: settings.challengeCreationEnabled === 1 && isKesWageringEnabled(),
+        challengeCreationEnabled: challengeCreationAllowed(settings.challengeCreationEnabled) && isKesWageringEnabled(),
         walletEnabled: Boolean(walletConfig),
         wageringEnabled: isKesWageringEnabled(),
         minimumStake: walletConfig?.minStake ?? null,
