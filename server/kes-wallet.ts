@@ -128,6 +128,20 @@ function newWalletReference(): string {
   return `PA${randomBytes(15).toString("hex").toUpperCase()}`;
 }
 
+export function parseDepositConfirmationDetails(details: string | null | undefined): { amountKes?: number; phone?: string; message?: string } {
+  if (!details) return { amountKes: undefined, phone: undefined, message: undefined };
+  try {
+    const parsed = JSON.parse(details) as Record<string, unknown>;
+    const rawAmount = typeof parsed.amountKes === "number" ? parsed.amountKes : typeof parsed.amountKes === "string" ? Number(parsed.amountKes) : undefined;
+    const amountKes = Number.isInteger(rawAmount) && rawAmount! > 0 ? rawAmount as number : undefined;
+    const phone = typeof parsed.phone === "string" ? parsed.phone.trim() || undefined : undefined;
+    const message = typeof parsed.message === "string" ? parsed.message.trim() || undefined : undefined;
+    return { amountKes, phone, message };
+  } catch {
+    return { amountKes: undefined, phone: undefined, message: undefined };
+  }
+}
+
 export async function ensureKesWalletAccount(tx: any, userId: number) {
   await tx.insert(kesWalletAccounts).values({ userId, walletReference: newWalletReference() }).onDuplicateKeyUpdate({ set: { userId } });
   let rows = await tx.select().from(kesWalletAccounts).where(eq(kesWalletAccounts.userId, userId)).for("update").limit(1);
@@ -189,6 +203,7 @@ export const kesWalletRouter = router({
     message: z.string().trim().min(10).max(1000),
   })).mutation(async ({ ctx, input }) => {
     const db = await database();
+    const adminRows = await db.select({ id: users.id }).from(users).where(eq(users.role, "admin"));
     await db.insert(notifications).values({
       userId: ctx.user.id,
       type: "wallet",
@@ -197,6 +212,16 @@ export const kesWalletRouter = router({
       entityType: "wallet",
       entityId: null,
     });
+    for (const admin of adminRows) {
+      await db.insert(notifications).values({
+        userId: admin.id,
+        type: "deposit_confirmation_review",
+        title: "Deposit confirmation needs review",
+        body: `Player #${ctx.user.id}${input.amountKes ? ` · KES ${input.amountKes}` : ""}${input.phone ? ` · ${input.phone}` : ""} · ${input.message.slice(0, 120)}${input.message.length > 120 ? "…" : ""}`,
+        entityType: "user",
+        entityId: ctx.user.id,
+      });
+    }
     await db.insert(adminAuditLogs).values({
       adminUserId: ctx.user.id,
       action: "submit_partner_deposit_confirmation",
@@ -210,6 +235,100 @@ export const kesWalletRouter = router({
       }),
     });
     return { success: true };
+  }),
+
+  depositConfirmationQueue: adminProcedure.query(async () => {
+    const db = await database();
+    const rows = await db.select({
+      id: adminAuditLogs.id,
+      userId: adminAuditLogs.entityId,
+      username: profiles.username,
+      walletReference: kesWalletAccounts.walletReference,
+      submittedAt: adminAuditLogs.createdAt,
+      details: adminAuditLogs.details,
+    }).from(adminAuditLogs)
+      .innerJoin(profiles, eq(profiles.userId, adminAuditLogs.entityId))
+      .leftJoin(kesWalletAccounts, eq(kesWalletAccounts.userId, adminAuditLogs.entityId))
+      .where(eq(adminAuditLogs.action, "submit_partner_deposit_confirmation"))
+      .orderBy(desc(adminAuditLogs.createdAt))
+      .limit(100);
+
+    return rows.map(row => {
+      const details = parseDepositConfirmationDetails(row.details);
+      return {
+        id: row.id,
+        userId: row.userId,
+        username: row.username,
+        walletReference: row.walletReference,
+        amountKes: details.amountKes ?? null,
+        phone: details.phone ?? null,
+        message: details.message ?? "No message included in the confirmation.",
+        submittedAt: row.submittedAt,
+      };
+    });
+  }),
+
+  awardDepositConfirmation: adminProcedure.input(z.object({
+    userId: z.number().int().positive(),
+    amountKes: z.number().int().positive(),
+    reason: z.string().trim().min(10).max(2000),
+    phone: z.string().trim().max(24).optional(),
+    message: z.string().trim().min(10).max(1000).optional(),
+  })).mutation(async ({ ctx, input }) => {
+    const db = await database();
+    return db.transaction(async tx => {
+      const wallet = await ensureKesWalletAccount(tx, input.userId);
+      const availableAfterKes = wallet.availableKes + input.amountKes;
+      const transactionKey = `manual-deposit:${input.userId}:${Date.now()}`;
+      const eventId = `manual-deposit:${input.userId}:${Date.now()}:${randomBytes(6).toString("hex")}`;
+      await tx.update(kesWalletAccounts).set({ availableKes: availableAfterKes }).where(eq(kesWalletAccounts.userId, input.userId));
+      await tx.insert(kesWalletTransactions).values({
+        userId: input.userId,
+        transactionType: "admin_adjustment",
+        amountKes: input.amountKes,
+        availableBeforeKes: wallet.availableKes,
+        availableAfterKes: availableAfterKes,
+        reservedBeforeKes: wallet.reservedKes,
+        reservedAfterKes: wallet.reservedKes,
+        status: "completed",
+        idempotencyKey: transactionKey,
+        reason: input.reason,
+      });
+      await tx.insert(partnerCreditEvents).values({
+        eventId,
+        transactionId: eventId,
+        eventType: "credit",
+        userId: input.userId,
+        walletReference: wallet.walletReference,
+        amountKes: input.amountKes,
+        currency: "KES",
+        status: "credited",
+        partnerOccurredAt: new Date(),
+      });
+      await tx.insert(adminAuditLogs).values({
+        adminUserId: ctx.user.id,
+        action: "award_manual_deposit_credit",
+        entityType: "user",
+        entityId: input.userId,
+        reason: input.reason,
+        details: JSON.stringify({
+          amountKes: input.amountKes,
+          phone: input.phone ?? null,
+          message: input.message ?? null,
+          walletReference: wallet.walletReference,
+          eventId,
+        }),
+      });
+      await tx.insert(notifications).values({
+        userId: input.userId,
+        type: "wallet",
+        title: "Deposit confirmed and credited",
+        body: `An administrator approved your KES ${input.amountKes} deposit confirmation and added it to your available wallet balance.`,
+        entityType: "user",
+        entityId: input.userId,
+      });
+      return { success: true, amountKes: input.amountKes };
+    });
   }),
 
   requestWithdrawal: protectedProcedure.input(withdrawalForm).mutation(async ({ ctx, input }) => {

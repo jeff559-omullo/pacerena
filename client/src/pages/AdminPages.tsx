@@ -24,6 +24,7 @@ function AdminOverview() {
     <section className="grid-2"><div className="card"><div className="card-header"><div><h3>Matches under review</h3><p>Timeout and conflicting evidence are never blind-settled.</p></div></div>{query.data.underReview.length ? <div className="challenge-list">{query.data.underReview.map(match => <Link key={match.id} className="challenge-card" href={`/admin/matches/${match.id}`}><div><strong>Fixture #{match.id}</strong><div className="meta-line">{match.disputeReason ?? "Requires review"}</div><div className="meta-line">{formatDate(match.createdAt)}</div></div><StatusPill status={match.status} /></Link>)}</div> : <EmptyState title="No match reviews waiting" icon={Shield} />}</div>
       <div className="card"><div className="card-header"><div><h3>Disputes</h3><p>Open or investigating</p></div><Link className="card-link" href="/admin/disputes">Open queue <ArrowRight size={13} /></Link></div>{query.data.openDisputes.length ? <div className="challenge-list">{query.data.openDisputes.slice(0, 5).map(item => <Link key={item.id} className="challenge-card" href={`/admin/matches/${item.matchId}`}><div><strong>Dispute #{item.id}</strong><div className="meta-line">{item.reason.replaceAll("_", " ")}</div></div><StatusPill status={item.status} /></Link>)}</div> : <EmptyState title="No open disputes" icon={ClipboardList} />}</div></section>
     <AdminAccountTools />
+    <AdminDepositConfirmationQueue />
     <AdminWithdrawalQueue />
     <AdminReversalQueue />
     <AdminTransactionReview />
@@ -102,6 +103,38 @@ function AdminTransactionReview() {
   const demoRows = query.data?.historicalDemoTransactions ?? [];
   return <><section className="card"><div className="card-header"><div><h3>Recent KES ledger</h3><p>Administrator view · append-only integer KES balances and transaction records</p></div><ClipboardList size={16} color="var(--lime)" /></div>{query.isLoading ? <LoadingRows count={2} /> : query.isError || !query.data ? <ErrorNotice message={query.error?.message ?? "KES transaction review is unavailable."} onRetry={() => query.refetch()} /> : rows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Player</th><th>Type</th><th>Amount</th><th>Available balance</th><th>Reason</th><th>When</th></tr></thead><tbody>{rows.map(({ username, transaction }) => <tr key={transaction.id}><td>{username}</td><td>{transaction.transactionType.replaceAll("_", " ")}</td><td>KES {transaction.amountKes.toLocaleString()}</td><td>{transaction.availableBeforeKes.toLocaleString()} → {transaction.availableAfterKes.toLocaleString()}</td><td>{transaction.reason}</td><td>{formatDate(transaction.createdAt)}</td></tr>)}</tbody></table></div> : <EmptyState title="No KES transactions yet" icon={ClipboardList} />}</section><section className="card"><div className="card-header"><div><h3>Archived demo ledger · read only</h3><p>Historical simulation only · no monetary value; no adjustments are available.</p></div><ClipboardList size={16} /></div>{demoRows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Player</th><th>Historical transaction</th><th>Amount</th><th>When</th></tr></thead><tbody>{demoRows.map(({ username, transaction }) => <tr key={transaction.id}><td>{username}</td><td>{transaction.transactionType.replaceAll("_", " ")}<div className="field-help">{transaction.reason}</div></td><td>{transaction.amount.toLocaleString()} demo credits · non-cash</td><td>{formatDate(transaction.createdAt)}</td></tr>)}</tbody></table></div> : <EmptyState title="No historic demo transactions" icon={ClipboardList} />}</section></>;
 }
+function AdminDepositConfirmationQueue() {
+  const query = trpc.kesWallet.depositConfirmationQueue.useQuery(undefined, { refetchInterval: 30_000 });
+  if (query.isLoading) return <section className="card"><LoadingRows count={2} /></section>;
+  if (query.isError || !query.data) return <ErrorNotice message={query.error?.message ?? "Deposit confirmation queue is unavailable."} onRetry={() => query.refetch()} />;
+  return <section className="card"><div className="card-header"><div><h3>Partner deposit confirmations</h3><p>Player-submitted M-Pesa or partner messages are held here for review before wallet credit is added.</p></div><WalletCards size={17} color="var(--lime)" /></div>{query.data.length ? <div className="page-stack">{query.data.map(item => <DepositConfirmationReview key={item.id} item={item} />)}</div> : <EmptyState title="No deposit confirmations waiting" icon={WalletCards}>Completed M-Pesa or partner confirmations will appear here for manual review.</EmptyState>}</section>;
+}
+
+function DepositConfirmationReview({ item }: { item: any }) {
+  const utils = trpc.useUtils();
+  const [reason, setReason] = useState("");
+  const [amount, setAmount] = useState(String(item.amountKes ?? ""));
+  const award = trpc.kesWallet.awardDepositConfirmation.useMutation({
+    onSuccess: async () => {
+      toast.success("Deposit confirmation approved and wallet credited.");
+      setReason("");
+      await Promise.all([
+        utils.kesWallet.depositConfirmationQueue.invalidate(),
+        utils.kesWallet.summary.invalidate(),
+        utils.kesWallet.history.invalidate(),
+        utils.arena.admin.overview.invalidate(),
+        utils.arena.admin.audit.invalidate(),
+      ]);
+    },
+    onError: error => toast.error(error.message),
+  });
+  const valid = reason.trim().length >= 10 && Number(amount) > 0;
+  return <article className="challenge-card" style={{ alignItems: "stretch" }}><div className="page-stack" style={{ width: "100%" }}><div className="match-toolbar"><strong>{item.username}</strong><StatusPill status="review" /></div><div className="meta-line"><span>Wallet {item.walletReference ?? "—"}</span><span>{item.phone ?? "No phone recorded"}</span><span>Submitted {formatDate(item.submittedAt)}</span></div><div className="field-help">Amount recorded: {item.amountKes ? `KES ${item.amountKes.toLocaleString()}` : "not supplied"}</div><div className="notice"><strong>Submitted payment message</strong><br />{item.message || "No message text was included in the confirmation."}</div><div className="form-grid"><div className="field"><label htmlFor={`deposit-review-amount-${item.id}`}>Approved KES credit</label><input className="input" id={`deposit-review-amount-${item.id}`} type="number" min={1} step={1} value={amount} onChange={event => setAmount(event.target.value)} /></div><div className="field full"><label htmlFor={`deposit-review-reason-${item.id}`}>Required reason</label><textarea className="textarea" id={`deposit-review-reason-${item.id}`} value={reason} onChange={event => setReason(event.target.value)} minLength={10} maxLength={2000} placeholder="Explain why this payment confirmation is valid and why the wallet should be credited." /></div></div><div className="form-actions"><button className="button button-primary" type="button" disabled={!valid || award.isPending} onClick={() => {
+        if (!window.confirm(`Award KES ${Number(amount).toLocaleString()} to ${item.username}?`)) return;
+        award.mutate({ userId: item.userId, amountKes: Number(amount), reason: reason.trim(), phone: item.phone ?? undefined, message: item.message || undefined });
+      }}>Award credit</button></div></div></article>;
+}
+
 function AdminWithdrawalQueue({ fullPage = false }: { fullPage?: boolean }) {
   const query = trpc.kesWallet.withdrawalQueue.useQuery(undefined, { refetchInterval: 30_000 });
   if (query.isLoading) return <section className="card"><LoadingRows count={2} /></section>;
