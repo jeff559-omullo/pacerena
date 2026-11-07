@@ -83,7 +83,7 @@ function CreateChallenge() {
   const minimumStake = rules.data?.minimumStake ?? STAKE_MIN;
   const maximumStake = rules.data?.maximumStake ?? STAKE_MAX;
   const defaultMinutes = rules.data?.defaultMatchMinutes ?? DEFAULT_MATCH_MINUTES;
-  const forceEnabled = true;
+  const forceEnabled = Boolean(rules.data?.walletEnabled && rules.data?.wageringEnabled);
   const creationPaused = rules.data?.challengeCreationEnabled === false || rules.data?.wageringEnabled !== true || rules.data?.walletEnabled !== true;
   const savedProfile = profile.data;
   const profileMatches = Boolean(savedProfile && (forceEnabled || savedProfile.eligibility === "eligible") && (forceEnabled || savedProfile.cashWalletStatus === "verified") && savedProfile.availability === "available" && savedProfile.preferredGame && savedProfile.gameEdition?.trim() && savedProfile.platform && savedProfile.preferredGame === game && savedProfile.gameEdition.trim().toLowerCase() === edition.trim().toLowerCase() && savedProfile.platform === platform);
@@ -146,6 +146,7 @@ function ChallengeDetail({ id }: { id: number }) {
   const [, setLocation] = useLocation();
   const utils = trpc.useUtils();
   const profile = trpc.arena.profile.me.useQuery(undefined, { retry: false });
+  const rules = trpc.arena.settings.rules.useQuery();
   const query = trpc.arena.challenges.details.useQuery({ id }, { retry: false });
   const accept = trpc.arena.challenges.accept.useMutation({
     onSuccess: async result => { await Promise.all([utils.arena.challenges.list.invalidate(), utils.kesWallet.summary.invalidate(), utils.arena.matches.list.invalidate()]); setLocation(`/matches/${result.matchId}`); },
@@ -163,7 +164,8 @@ function ChallengeDetail({ id }: { id: number }) {
   if (query.isError || !query.data) return <ErrorNotice message={query.error?.message ?? "Challenge could not be loaded."} onRetry={() => query.refetch()} />;
   const item = query.data;
   const own = item.isOwner;
-  const availableToAccept = item.stakeCurrency === "KES" && item.creator.availability === "available" && profile.data?.availability === "available" && profile.data?.cashWalletStatus === "verified";
+  const forceEnabled = Boolean(rules.data?.walletEnabled && rules.data?.wageringEnabled);
+  const availableToAccept = item.stakeCurrency === "KES" && item.creator.availability === "available" && profile.data?.availability === "available" && (forceEnabled || profile.data?.cashWalletStatus === "verified");
   const legacyDemo = item.stakeCurrency !== "KES";
   const expired = new Date(item.expiresAt).getTime() <= Date.now();
 
