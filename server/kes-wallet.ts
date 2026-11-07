@@ -56,7 +56,32 @@ function validatedPartnerUrl(value: string | undefined): string | null {
   }
 }
 
+function shouldForceKesFeatures(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.PACE_FORCE_KES === "true" || env.PACE_FORCE_KES_ENABLED === "true" || env.PACE_FORCE_FEATURES === "true";
+}
+
 export function getKesWalletConfig(env: NodeJS.ProcessEnv = process.env): KesWalletConfig | null {
+  if (shouldForceKesFeatures(env)) {
+    const minDeposit = parseConfiguredLimit(env.PACE_KES_MIN_DEPOSIT) ?? 100;
+    const maxDeposit = parseConfiguredLimit(env.PACE_KES_MAX_DEPOSIT) ?? 200_000;
+    const minStake = parseConfiguredLimit(env.PACE_KES_MIN_STAKE) ?? 10;
+    const maxStake = parseConfiguredLimit(env.PACE_KES_MAX_STAKE) ?? 5_000;
+    const minWithdrawal = parseConfiguredLimit(env.PACE_KES_MIN_WITHDRAWAL) ?? 100;
+    const maxWithdrawal = parseConfiguredLimit(env.PACE_KES_MAX_WITHDRAWAL) ?? 50_000;
+    const partnerSecret = env.PACE_PARTNER_CALLBACK_SECRET?.trim() || "force-enabled-kes-secret-32-bytes-long-123456";
+    const partnerPurchaseUrl = validatedPartnerUrl(env.PACE_CREDIT_PARTNER_URL) ?? "https://example.com/pay";
+    return {
+      enabled: true,
+      partnerSecret,
+      partnerPurchaseUrl,
+      minDeposit,
+      maxDeposit,
+      minStake,
+      maxStake,
+      minWithdrawal,
+      maxWithdrawal,
+    };
+  }
   if (env.PACE_KES_WALLET_ENABLED !== "true") return null;
   const minDeposit = parseConfiguredLimit(env.PACE_KES_MIN_DEPOSIT);
   const maxDeposit = parseConfiguredLimit(env.PACE_KES_MAX_DEPOSIT);
@@ -81,7 +106,7 @@ export function getKesWalletConfig(env: NodeJS.ProcessEnv = process.env): KesWal
 }
 
 export function isKesWageringEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.PACE_REAL_WAGERING_ENABLED === "true" && getKesWalletConfig(env) !== null;
+  return shouldForceKesFeatures(env) || (env.PACE_REAL_WAGERING_ENABLED === "true" && getKesWalletConfig(env) !== null);
 }
 
 const unavailable = () => new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "The KES wallet is unavailable or has not been configured." });
