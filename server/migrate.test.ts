@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Connection } from "mysql2/promise";
-import { MIGRATION_LOCK_NAME, planKes0006Recovery, withMigrationAdvisoryLock, type Kes0006IndexMetadata, type Kes0006SchemaState } from "./migrate";
+import { shouldRunSchemaMigrations } from "./_core/index";
+import { MIGRATION_LOCK_NAME, createSecureMysqlConnectionOptions, planKes0006Recovery, withMigrationAdvisoryLock, type Kes0006IndexMetadata, type Kes0006SchemaState } from "./migrate";
 
 type LockClient = Pick<Connection, "query">;
 
@@ -52,6 +53,30 @@ function interruptedKes0006State(): Kes0006SchemaState {
     challengeStatusColumnType: "enum('open','accepted','expired','cancelled','rejected')",
   };
 }
+
+describe("startup database bootstrap", () => {
+  it("runs schema migration whenever a database URL is configured, even in local development", () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+
+    process.env.NODE_ENV = "development";
+    process.env.DATABASE_URL = "mysql://user:pass@host:3306/app";
+
+    try {
+      expect(shouldRunSchemaMigrations()).toBe(true);
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previousNodeEnv;
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+  });
+
+  it("forces TLS for TiDB Cloud connections and rejects explicit insecure overrides", () => {
+    const secureConfig = createSecureMysqlConnectionOptions("mysql://user:pass@gateway01.ap-northeast-1.prod.aws.tidbcloud.com:4000/pacearena");
+    expect(secureConfig.ssl).toMatchObject({ minVersion: "TLSv1.2", rejectUnauthorized: true });
+
+    expect(() => createSecureMysqlConnectionOptions("mysql://user:pass@gateway01.ap-northeast-1.prod.aws.tidbcloud.com:4000/pacearena?ssl=false")).toThrow(/TLS/);
+  });
+});
 
 describe("production database migration lock", () => {
   it("runs migrations while holding one named MySQL advisory lock and releases it", async () => {

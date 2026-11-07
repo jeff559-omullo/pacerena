@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { publicPlatformScript } from "./publicConfig";
 import { appRouter } from "../routers";
@@ -11,9 +12,14 @@ import { registerMatchRecordingRoutes } from "../match-recordings";
 import { registerPartnerCreditRoute } from "../kes-wallet";
 import { processMatchTimeouts } from "../arena";
 import { runPendingMigrations } from "../migrate";
+import { ENV } from "./env";
+
+export function shouldRunSchemaMigrations() {
+  return process.env.NODE_ENV === "production" || Boolean(process.env.DATABASE_URL ?? ENV.databaseUrl);
+}
 
 async function startServer() {
-  let databaseReady = process.env.NODE_ENV !== "production";
+  let databaseReady = false;
   const app = express();
   app.set("trust proxy", 1);
   app.use((req, res, next) => {
@@ -59,15 +65,25 @@ async function startServer() {
       timeoutTimer.unref();
     };
 
-    if (process.env.NODE_ENV === "production") {
-      void runPendingMigrations().then(startTimeoutWorker).catch(error => {
-        console.error("[Database] Startup migrations failed; API remains unavailable.", error instanceof Error ? error.message : "unknown error");
-        server.close(() => process.exit(1));
-      });
-    } else {
+    const initializeDatabase = async () => {
+      const databaseUrl = process.env.DATABASE_URL ?? ENV.databaseUrl;
+      if (!shouldRunSchemaMigrations() || !databaseUrl) {
+        startTimeoutWorker();
+        return;
+      }
+
+      await runPendingMigrations(databaseUrl);
       startTimeoutWorker();
-    }
+    };
+
+    void initializeDatabase().catch(error => {
+      console.error("[Database] Startup migrations failed; API remains unavailable.", error instanceof Error ? error.message : "unknown error");
+      server.close(() => process.exit(1));
+    });
   });
 }
 
-startServer().catch(error => { console.error("Server startup failed:", error instanceof Error ? error.message : "unknown error"); process.exit(1); });
+const entryScript = process.argv[1] ? fileURLToPath(pathToFileURL(process.argv[1]).href) : "";
+if (entryScript && fileURLToPath(import.meta.url) === entryScript) {
+  startServer().catch(error => { console.error("Server startup failed:", error instanceof Error ? error.message : "unknown error"); process.exit(1); });
+}

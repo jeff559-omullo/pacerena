@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Activity, Bell, ChevronDown, Gamepad2, LayoutDashboard, LogOut, Shield, Swords, UserRound, UsersRound, WalletCards } from "lucide-react";
+import { Activity, Bell, ChevronDown, Gamepad2, LayoutDashboard, LogOut, Plus, Shield, Swords, UserRound, UsersRound, WalletCards } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 
@@ -37,6 +37,15 @@ export default function AppShell({ children, admin = false }: { children: React.
   const title = location.startsWith("/challenges") ? "Challenges" : location.startsWith("/players") ? "Players" : location.startsWith("/matches") ? "Matches" : location.startsWith("/wallet") || location.startsWith("/transactions") ? "KES wallet" : location.startsWith("/notifications") ? "Notifications" : location.startsWith("/admin") ? "Operations" : location.startsWith("/profile") || location.startsWith("/settings") ? "Your profile" : "Overview";
   const badge = unread.data?.filter(item => !item.readAt).length ?? 0;
   const initials = (profile.data?.username ?? session.data?.name ?? "PA").slice(0, 2).toUpperCase();
+  const mobileNavItems = [
+    { href: "/dashboard", label: "Home", icon: LayoutDashboard },
+    { href: "/challenges/new", label: "New", icon: Plus },
+    { href: "/challenges", label: "Play", icon: Gamepad2 },
+    { href: "/matches", label: "Matches", icon: Activity },
+    { href: "/wallet", label: "Wallet", icon: WalletCards },
+    { href: "/profile", label: "Profile", icon: UserRound },
+    ...(session.data?.role === "admin" ? [{ href: "/admin", label: "Admin", icon: Shield }] : []),
+  ];
 
   return <div className="app-frame">
     <aside className="sidebar">
@@ -60,14 +69,8 @@ export default function AppShell({ children, admin = false }: { children: React.
       <main className="workspace">{children}</main>
     </div>
     <nav className="mobile-nav" aria-label="Mobile navigation">
-      {[
-        { href: "/dashboard", label: "Home", icon: LayoutDashboard },
-        { href: "/challenges", label: "Play", icon: Gamepad2 },
-        { href: "/players", label: "Players", icon: UsersRound },
-        { href: "/matches", label: "Matches", icon: Activity },
-        { href: "/wallet", label: "Wallet", icon: WalletCards },
-        { href: "/profile", label: "Profile", icon: UserRound },
-      ].map(item => <Link key={item.href} href={item.href} className={location === item.href ? "mobile-active" : ""}><item.icon size={19} /><span>{item.label}</span></Link>)}
+      {mobileNavItems.map(item => <Link key={item.href} href={item.href} className={location === item.href || (item.href !== "/dashboard" && location.startsWith(item.href)) ? "mobile-active" : ""}><item.icon size={19} /><span>{item.label}</span></Link>)}
+      <button type="button" className="mobile-nav-button" onClick={() => logout.mutate()} disabled={logout.isPending} aria-label="Sign out"><LogOut size={19} /><span>{logout.isPending ? "Out" : "Exit"}</span></button>
     </nav>
   </div>;
 }

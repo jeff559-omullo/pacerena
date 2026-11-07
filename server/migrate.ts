@@ -1,9 +1,64 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { createConnection, type Connection } from "mysql2/promise";
+import { createConnection, type Connection, type ConnectionOptions } from "mysql2/promise";
 import { drizzle } from "drizzle-orm/mysql2";
 import { migrate } from "drizzle-orm/mysql2/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
+
+const TIDB_TLS_CONFIG = {
+  minVersion: "TLSv1.2",
+  rejectUnauthorized: true,
+} as const;
+
+function redactDatabaseUrl(databaseUrl: string): string {
+  try {
+    const parsed = new URL(databaseUrl);
+    if (parsed.password) parsed.password = "***";
+    return parsed.toString();
+  } catch {
+    return databaseUrl.replace(/(:\/\/)([^:@]+):([^@]+)@/, "$1$2:***@");
+  }
+}
+
+export function createSecureMysqlConnectionOptions(databaseUrl: string): ConnectionOptions {
+  try {
+    const parsed = new URL(databaseUrl);
+    const sslOverride = parsed.searchParams.get("ssl");
+    if (sslOverride && /^(false|0|off|disable|disabled)$/i.test(sslOverride)) {
+      throw new Error("DATABASE_URL disables TLS; TiDB Cloud requires encrypted transport.");
+    }
+
+    const isTiDBServerlessHost = /tidbcloud\.com|gateway\d*\.|mysql\.|db\./i.test(parsed.hostname);
+    if ((isTiDBServerlessHost || parsed.hostname.includes("localhost") === false) && !parsed.searchParams.has("ssl")) {
+      parsed.searchParams.set("ssl", JSON.stringify(TIDB_TLS_CONFIG));
+    }
+
+    const databaseName = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+    return {
+      host: parsed.hostname,
+      port: Number(parsed.port || 4000),
+      user: decodeURIComponent(parsed.username),
+      password: decodeURIComponent(parsed.password),
+      database: databaseName,
+      ssl: { ...TIDB_TLS_CONFIG },
+    } satisfies ConnectionOptions;
+  } catch (error) {
+    throw new Error(`Invalid TiDB/MySQL DATABASE_URL (${redactDatabaseUrl(databaseUrl)}): ${error instanceof Error ? error.message : "unknown error"}`);
+  }
+}
+
+async function validateDatabaseConnection(connection: Connection): Promise<string> {
+  try {
+    const [rows] = await connection.query("SELECT VERSION() AS version");
+    const version = Array.isArray(rows) && rows.length > 0 && typeof (rows[0] as { version?: string }).version === "string"
+      ? (rows[0] as { version: string }).version
+      : "unknown";
+    console.info("[Database] TLS connection verified. MySQL version:", version);
+    return version;
+  } catch (error) {
+    throw new Error(`Database connectivity check failed before migration: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
+}
 
 export const MIGRATION_LOCK_NAME = "pace_arena_schema_migrations";
 const MIGRATION_LOCK_WAIT_SECONDS = 120;
@@ -159,6 +214,131 @@ async function inspectKes0006Schema(connection: MigrationLockConnection): Promis
   };
 }
 
+const REQUIRED_INITIALIZED_TABLES = [
+  "users",
+  "admin_audit_logs",
+  "auth_sessions",
+  "challenges",
+  "disputes",
+  "email_accounts",
+  "match_codes",
+  "match_evidence",
+  "match_participants",
+  "matches",
+  "notifications",
+  "profiles",
+  "wallet_accounts",
+  "wallet_transactions",
+] as const;
+
+async function schemaLooksInitialized(connection: MigrationLockConnection): Promise<boolean> {
+  const tableRows = await queryRows<{ TABLE_NAME: string }>(connection,
+    `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN (${REQUIRED_INITIALIZED_TABLES.map(table => `'${table}'`).join(",")})`);
+  const presentTables = new Set(tableRows.map(row => row.TABLE_NAME));
+  return REQUIRED_INITIALIZED_TABLES.every(table => presentTables.has(table));
+}
+
+async function hasKes0006Features(connection: MigrationLockConnection): Promise<boolean> {
+  const columnRows = await queryRows<{ TABLE_NAME: string; COLUMN_NAME: string }>(connection,
+    "SELECT TABLE_NAME,COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND ((TABLE_NAME='challenges' AND COLUMN_NAME='stakeCurrency') OR (TABLE_NAME='profiles' AND COLUMN_NAME='cashWalletStatus'))");
+  const tableRows = await queryRows<{ TABLE_NAME: string }>(connection,
+    "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('kes_wallet_accounts','kes_withdrawal_requests','kes_wallet_transactions','partner_credit_events')");
+  const presentColumns = new Set(columnRows.map(row => `${row.TABLE_NAME}.${row.COLUMN_NAME}`));
+  return presentColumns.has("challenges.stakeCurrency") && presentColumns.has("profiles.cashWalletStatus") && tableRows.length >= 4;
+}
+
+async function applyMissingMigrationByTag(connection: MigrationLockConnection, migrationsFolder: string, tag: string, tableName?: string): Promise<boolean> {
+  const migrationTableRows = await queryRows<{ TABLE_NAME: string }>(connection,
+    "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='__drizzle_migrations' LIMIT 1");
+  if (migrationTableRows.length === 0) return false;
+
+  if (tableName) {
+    const escapedTableName = tableName.replace(/'/g, "''");
+    const tableRows = await queryRows<{ TABLE_NAME: string }>(connection,
+      `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='${escapedTableName}'`);
+    if (tableRows.length > 0) return false;
+  }
+
+  const journalPath = path.join(migrationsFolder, "meta", "_journal.json");
+  const migrationJournal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ tag: string; when: number }> };
+  const targetEntry = migrationJournal.entries.find(entry => entry.tag === tag);
+  if (!targetEntry) return false;
+
+  const historyRows = await queryRows<{ created_at: number | string }>(connection, "SELECT created_at FROM `__drizzle_migrations`");
+  const hasJournalEntry = historyRows.some(row => Number(row.created_at) === targetEntry.when);
+
+  const migrationFilePath = path.join(migrationsFolder, `${tag}.sql`);
+  const migrationSql = readFileSync(migrationFilePath, "utf8");
+  const statements = migrationSql
+    .split("--> statement-breakpoint")
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  for (const statement of statements) {
+    await connection.query(statement);
+  }
+
+  if (!hasJournalEntry) {
+    const migrationFiles = readMigrationFiles({ migrationsFolder });
+    const migration = migrationFiles.find(file => file.folderMillis === targetEntry.when);
+    if (!migration) throw new Error(`Missing Drizzle migration file for journal entry ${tag}.`);
+    await connection.query("INSERT INTO `__drizzle_migrations` (`hash`,`created_at`) VALUES (?,?)", [migration.hash, migration.folderMillis]);
+  }
+
+  console.info(`[Database] Applied the missing ${tag} SQL after detecting a schema gap${hasJournalEntry ? " despite an existing but stale migration journal entry" : ""}.`);
+  return true;
+}
+
+async function applyKes0006Migration(connection: MigrationLockConnection, migrationsFolder: string): Promise<boolean> {
+  const migrationTableRows = await queryRows<{ TABLE_NAME: string }>(connection,
+    "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='__drizzle_migrations' LIMIT 1");
+  if (migrationTableRows.length === 0 || !(await schemaLooksInitialized(connection))) return false;
+  if (await hasKes0006Features(connection)) return false;
+
+  const journalPath = path.join(migrationsFolder, "meta", "_journal.json");
+  const migrationJournal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ tag: string; when: number }> };
+  const targetEntry = migrationJournal.entries.find(entry => entry.tag === KES_MIGRATION_TAG);
+  if (!targetEntry) throw new Error("The KES migration entry is missing from the journal.");
+  const migrationFilePath = path.join(migrationsFolder, `${KES_MIGRATION_TAG}.sql`);
+  const migrationSql = readFileSync(migrationFilePath, "utf8");
+
+  const statements = migrationSql
+    .split("--> statement-breakpoint")
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  for (const statement of statements) {
+    await connection.query(statement);
+  }
+
+  console.info(`[Database] Applied the missing ${KES_MIGRATION_TAG} SQL after detecting an initialized-but-incomplete schema.`);
+  return true;
+}
+
+async function reconcileStaleMigrationJournal(connection: MigrationLockConnection, migrationsFolder: string): Promise<boolean> {
+  const migrationTableRows = await queryRows<{ TABLE_NAME: string }>(connection,
+    "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='__drizzle_migrations' LIMIT 1");
+  if (migrationTableRows.length === 0 || !(await schemaLooksInitialized(connection))) return false;
+  if (!(await hasKes0006Features(connection))) return false;
+
+  const journalPath = path.join(migrationsFolder, "meta", "_journal.json");
+  const migrationJournal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ tag: string; when: number }> };
+  const migrationFiles = readMigrationFiles({ migrationsFolder });
+  const existingRows = await queryRows<{ hash: string; created_at: number | string }>(connection, "SELECT hash, created_at FROM `__drizzle_migrations`");
+  const existingCreatedAt = new Set(existingRows.map(row => Number(row.created_at)));
+  const missingEntries = migrationJournal.entries.filter(entry => !existingCreatedAt.has(entry.when));
+  if (missingEntries.length === 0) return false;
+
+  for (const entry of missingEntries) {
+    const migration = migrationFiles.find(file => file.folderMillis === entry.when);
+    if (!migration) throw new Error(`Missing Drizzle migration file for journal entry ${entry.tag}.`);
+    await connection.query("INSERT INTO `__drizzle_migrations` (`hash`,`created_at`) VALUES (?,?)", [migration.hash, migration.folderMillis]);
+  }
+
+  console.info(`[Database] Reconciled a stale Drizzle journal for an initialized schema (${missingEntries.length} entries synced).`);
+  return true;
+}
+
 async function recoverInterruptedKes0006(connection: MigrationLockConnection, migrationsFolder: string): Promise<void> {
   const migrationTableRows = await queryRows<{ TABLE_NAME: string }>(connection,
     "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='__drizzle_migrations' LIMIT 1");
@@ -197,11 +377,23 @@ async function recoverInterruptedKes0006(connection: MigrationLockConnection, mi
 
 export async function runPendingMigrations(databaseUrl = process.env.DATABASE_URL): Promise<void> {
   if (!databaseUrl) throw new Error("DATABASE_URL is required before the production server can become ready.");
-  const connection = await createConnection(databaseUrl);
+
+  const connectionOptions = createSecureMysqlConnectionOptions(databaseUrl);
+  const connection = await createConnection(connectionOptions);
   try {
+    await validateDatabaseConnection(connection);
     await withMigrationAdvisoryLock(connection, async () => {
       const migrationsFolder = path.resolve(process.cwd(), "drizzle");
       await recoverInterruptedKes0006(connection, migrationsFolder);
+      if (await applyMissingMigrationByTag(connection, migrationsFolder, "0005_match_video_recordings", "match_video_recordings")) {
+        // The recording table is now present; continue to the rest of the migration reconciliation.
+      }
+      if (await applyKes0006Migration(connection, migrationsFolder)) {
+        // The schema is now repaired; leave the rest of the Drizzle migration runner to catch any later migrations.
+      }
+      if (await reconcileStaleMigrationJournal(connection, migrationsFolder)) {
+        return;
+      }
       const database = drizzle(connection);
       await migrate(database, { migrationsFolder });
     });
