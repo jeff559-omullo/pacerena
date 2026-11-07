@@ -29,6 +29,9 @@ export default function WalletPages({ mode }: { mode: "wallet" | "transactions" 
   const utils = trpc.useUtils();
   const [amountKes, setAmountKes] = useState("");
   const [phone, setPhone] = useState("");
+  const [depositMessage, setDepositMessage] = useState("");
+  const [depositAmount, setDepositAmount] = useState("");
+  const [depositPhone, setDepositPhone] = useState("");
   const withdrawal = trpc.kesWallet.requestWithdrawal.useMutation({
     onSuccess: async result => {
       toast.success(`Withdrawal request #${result.requestId} is pending administrator processing. No payout has been sent by Pace Arena.`);
@@ -50,6 +53,15 @@ export default function WalletPages({ mode }: { mode: "wallet" | "transactions" 
     if (!window.confirm(`Reserve KES ${amount.toLocaleString()} for manual M-Pesa processing to ${phone.trim()}? This request is not a payout.`)) return;
     withdrawal.mutate({ amountKes: amount, phone, idempotencyKey: crypto.randomUUID() });
   };
+  const depositConfirmation = trpc.kesWallet.submitDepositConfirmation.useMutation({
+    onSuccess: () => {
+      toast.success("Your M-Pesa confirmation message was submitted for review.");
+      setDepositMessage("");
+      setDepositAmount("");
+      setDepositPhone("");
+    },
+    onError: error => toast.error(error.message),
+  });
 
   return <div className="page-stack">
     <PageTitle eyebrow="KES WALLET" title={mode === "wallet" ? "Your KES wallet" : "KES transaction history"} description="KES credits are purchased on the partner site. Pace Arena records signed partner credits and match balances; M-Pesa withdrawals are processed manually by an administrator." action={<Link className="button button-ghost" href="/transactions"><ReceiptText size={15} /> Full ledger</Link>} />
@@ -57,7 +69,14 @@ export default function WalletPages({ mode }: { mode: "wallet" | "transactions" 
     {wallet.isError && configured && <ErrorNotice message={wallet.error?.message ?? "KES wallet data is unavailable."} onRetry={() => wallet.refetch()} />}
     {configured && walletData && <>
       {walletData.frozen && <div className="notice" role="alert"><strong>Wallet paused for administrator review.</strong> {walletData.freezeReason || "KES wagering and withdrawals are paused."}</div>}
-      <section className="card"><div className="card-header"><div><h3>Deposit KES</h3><p>Top up your wallet using the partner checkout link. Credits are added after a signed payment callback.</p></div><Coins size={17} color="var(--lime)" /></div><div className="form-actions"><a className="button button-primary" href={status.data.partnerPurchaseUrl ?? "https://www.zetupay.co.ke/link/6BRFBFRE"} target="_blank" rel="noreferrer">Deposit to KES wallet <ExternalLink size={15} /></a></div><p className="field-help">Use this when you need to fund a challenge or keep enough KES available to play.</p></section>
+      <section className="card"><div className="card-header"><div><h3>Deposit KES</h3><p>Top up your wallet using the partner checkout link. Credits are added after a signed payment callback.</p></div><Coins size={17} color="var(--lime)" /></div>
+        <div className="page-stack">
+          <div className="form-actions"><a className="button button-primary" href={status.data.partnerPurchaseUrl ?? "https://www.zetupay.co.ke/link/6BRFBFRE"} target="_blank" rel="noreferrer">Open partner deposit page <ExternalLink size={15} /></a></div>
+          <div className="form-grid"><div className="field"><label htmlFor="deposit-amount">Amount (KES)</label><input className="input" id="deposit-amount" type="number" min={1} step={1} value={depositAmount} onChange={event => setDepositAmount(event.target.value)} placeholder="500" /></div><div className="field"><label htmlFor="deposit-phone">Phone / reference</label><input className="input" id="deposit-phone" value={depositPhone} onChange={event => setDepositPhone(event.target.value)} placeholder="e.g. 2547xx or receipt ref" /></div><div className="field full"><label htmlFor="deposit-message">Paste M-Pesa / partner message</label><textarea className="textarea" id="deposit-message" value={depositMessage} onChange={event => setDepositMessage(event.target.value)} placeholder="Paste the confirmation text from the payment message or partner checkout here." minLength={10} maxLength={1000} /></div></div>
+          <div className="form-actions"><SpinnerButton type="button" busy={depositConfirmation.isPending} disabled={!depositMessage.trim() || depositConfirmation.isPending} onClick={() => depositConfirmation.mutate({ amountKes: depositAmount ? Number(depositAmount) : undefined, phone: depositPhone.trim() || undefined, message: depositMessage.trim() })}>Submit payment confirmation</SpinnerButton></div>
+        </div>
+        <p className="field-help">Use this when you paid through the partner page and want to log the M-Pesa confirmation message for admin review.</p>
+      </section>
       <section className="grid-2"><div className="card stat-card accent-stat" style={{ minHeight: 145 }}><span className="stat-icon"><Coins size={16} /></span><div className="stat-label">Available</div><div className="stat-value">KES {walletData.availableKes.toLocaleString()}</div><div className="stat-foot">May be reserved for an eligible challenge or withdrawal</div></div><div className="card stat-card" style={{ minHeight: 145 }}><span className="stat-icon"><WalletCards size={16} /></span><div className="stat-label">Reserved</div><div className="stat-value">KES {walletData.reservedKes.toLocaleString()}</div><div className="stat-foot">Open stakes, active matches and pending withdrawals</div></div></section>
       <section className="card"><div className="card-header"><div><h3>Your partner wallet reference</h3><p>Give this reference to the licensed partner site when buying credits. Credits are added only after a valid signed server callback.</p></div><ShieldCheck size={17} color="var(--lime)" /></div><div className="form-actions"><code className="wallet-reference">{walletData.walletReference}</code><button className="button button-ghost button-small" type="button" onClick={() => { void navigator.clipboard.writeText(walletData.walletReference).then(() => toast.success("Wallet reference copied."), () => toast.error("Could not access the clipboard.")); }}><Copy size={13} /> Copy</button></div><p className="field-help">A browser payment redirect or screenshot does not credit this wallet.</p></section>
       <section className="card"><div className="card-header"><div><h3>Request a manual M-Pesa withdrawal</h3><p>Requests reserve your available KES. An administrator sends money outside Pace Arena and records the M-Pesa receipt.</p></div><WalletCards size={17} color="var(--lime)" /></div>

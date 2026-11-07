@@ -1,5 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { Activity, Bell, ChevronDown, Gamepad2, LayoutDashboard, LogOut, Plus, Shield, Swords, UserRound, UsersRound, WalletCards } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 
@@ -25,6 +26,8 @@ export default function AppShell({ children, admin = false }: { children: React.
   const session = trpc.auth.me.useQuery(undefined, { retry: false, staleTime: 20_000 });
   const wallet = trpc.kesWallet.summary.useQuery(undefined, { retry: false, staleTime: 30_000 });
   const unread = trpc.arena.notifications.list.useQuery(undefined, { retry: false, refetchInterval: 30_000 });
+  const seenNotificationIds = useRef<Set<number>>(new Set());
+  const supportsNotifications = typeof window !== "undefined" && "Notification" in window;
   const logout = trpc.auth.logout.useMutation({
     onSuccess: async () => {
       await session.refetch();
@@ -37,6 +40,41 @@ export default function AppShell({ children, admin = false }: { children: React.
   const title = location.startsWith("/challenges") ? "Challenges" : location.startsWith("/players") ? "Players" : location.startsWith("/matches") ? "Matches" : location.startsWith("/wallet") || location.startsWith("/transactions") ? "KES wallet" : location.startsWith("/notifications") ? "Notifications" : location.startsWith("/admin") ? "Operations" : location.startsWith("/profile") || location.startsWith("/settings") ? "Your profile" : "Overview";
   const badge = unread.data?.filter(item => !item.readAt).length ?? 0;
   const initials = (profile.data?.username ?? session.data?.name ?? "PA").slice(0, 2).toUpperCase();
+
+  useEffect(() => {
+    if (!supportsNotifications || !session.data) return;
+    if (Notification.permission === "default") {
+      const alreadyPrompted = window.sessionStorage.getItem("pacearena-notification-prompted");
+      if (!alreadyPrompted) {
+        window.sessionStorage.setItem("pacearena-notification-prompted", "1");
+        void Notification.requestPermission().catch(() => undefined);
+      }
+    }
+  }, [session.data, supportsNotifications]);
+
+  useEffect(() => {
+    if (!unread.data || !Array.isArray(unread.data)) return;
+    const latestUnread = unread.data.filter(item => !item.readAt);
+    const fresh = latestUnread.filter(item => !seenNotificationIds.current.has(item.id));
+    if (!fresh.length) {
+      seenNotificationIds.current = new Set(latestUnread.map(item => item.id));
+      return;
+    }
+    for (const item of fresh) {
+      const body = item.body || "New update";
+      if (supportsNotifications && Notification.permission === "granted") {
+        const browserNotification = new Notification(item.title, { body, tag: `pacearena-${item.id}` });
+        browserNotification.onclick = () => {
+          window.focus();
+          setLocation("/notifications");
+        };
+      } else {
+        toast(item.title, { description: body, duration: 7000 });
+      }
+    }
+    seenNotificationIds.current = new Set(latestUnread.map(item => item.id));
+  }, [unread.data, supportsNotifications, setLocation]);
+
   const mobileNavItems = [
     { href: "/dashboard", label: "Home", icon: LayoutDashboard },
     { href: "/challenges/new", label: "New", icon: Plus },
@@ -65,7 +103,7 @@ export default function AppShell({ children, admin = false }: { children: React.
       </div>
     </aside>
     <div className="main-column">
-      <header className="topbar"><div><div className="breadcrumb">PACE ARENA <span>/</span> {admin ? "ADMIN" : title.toUpperCase()}</div><h1>{admin ? "Operations desk" : title}</h1></div><div className="topbar-actions"><Link href="/wallet" className="balance-pill"><WalletCards size={16} /><strong>{wallet.data?.availableKes?.toLocaleString() ?? "—"}</strong><span>KES</span></Link><Link href="/notifications" className="icon-button" aria-label={`Notifications${badge ? `, ${badge} unread` : ""}`}><Bell size={18} />{badge > 0 && <i className="notification-dot" />}</Link><Link href="/profile" className="top-profile"><span className="avatar small" style={{ background: profile.data?.avatarColor ?? "#B7F34A" }}>{initials}</span><ChevronDown size={14} /></Link></div></header>
+      <header className="topbar"><div><div className="breadcrumb">PACE ARENA <span>/</span> {admin ? "ADMIN" : title.toUpperCase()}</div><h1>{admin ? "Operations desk" : title}</h1></div><div className="topbar-actions"><Link href="/wallet" className="balance-pill"><WalletCards size={16} /><strong>{wallet.data?.availableKes?.toLocaleString() ?? "—"}</strong><span>KES</span></Link>{supportsNotifications && Notification.permission === "default" && <button type="button" className="button button-ghost button-small" onClick={() => { window.sessionStorage.setItem("pacearena-notification-prompted", "1"); void Notification.requestPermission().then(permission => { if (permission === "granted") toast.success("Phone alerts are enabled."); else toast.info("Notifications are off for now. You can change this in your browser settings."); }).catch(() => undefined); }}>Enable alerts</button>}<Link href="/notifications" className="icon-button" aria-label={`Notifications${badge ? `, ${badge} unread` : ""}`}><Bell size={18} />{badge > 0 && <i className="notification-dot" />}</Link><Link href="/profile" className="top-profile"><span className="avatar small" style={{ background: profile.data?.avatarColor ?? "#B7F34A" }}>{initials}</span><ChevronDown size={14} /></Link></div></header>
       <main className="workspace">{children}</main>
     </div>
     <nav className="mobile-nav" aria-label="Mobile navigation">

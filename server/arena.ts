@@ -97,12 +97,13 @@ async function notify(tx: any, userId: number, type: string, title: string, body
 async function requireEligible(tx: any, userId: number) {
   const rows = await tx.select().from(profiles).where(eq(profiles.userId, userId)).for("update").limit(1);
   const profile = rows[0];
-  if (!profile || profile.eligibility !== "eligible") forbidden("Your account is not eligible to enter a match. Contact support or review the account notice.");
+  if (!profile) forbidden("Your account is not eligible to enter a match. Contact support or review the account notice.");
+  if (!shouldForceKesFeatures() && profile.eligibility !== "eligible") forbidden("Your account is not eligible to enter a match. Contact support or review the account notice.");
   return profile;
 }
 async function requireKesEligible(tx: any, userId: number) {
   const profile = await requireEligible(tx, userId);
-  if (profile.cashWalletStatus !== "verified") forbidden("Your KES wallet must be verified by an administrator before you can wager.");
+  if (!shouldForceKesFeatures() && profile.cashWalletStatus !== "verified") forbidden("Your KES wallet must be verified by an administrator before you can wager.");
   const wallet = await ensureKesWalletAccount(tx, userId);
   if (wallet.frozen === 1) forbidden("Your KES wallet is frozen for administrator review; wagering is paused.");
   return profile;
@@ -433,7 +434,7 @@ export const arenaRouter = router({
         if (input.inviteUsername) {
           if (input.inviteUsername === profile.username) forbidden("You cannot send a challenge to yourself.");
           const [target] = await tx.select().from(profiles).where(eq(profiles.username, input.inviteUsername)).for("update").limit(1);
-          if (!target || target.eligibility !== "eligible" || target.cashWalletStatus !== "verified" || target.availability !== "available" || !target.preferredGame || !target.gameEdition || !target.platform || !areCompatible({ gameA: input.game, gameB: target.preferredGame, editionA: input.edition, editionB: target.gameEdition, platformA: input.platform, platformB: target.platform })) {
+          if (!target || (!shouldForceKesFeatures() && (target.eligibility !== "eligible" || target.cashWalletStatus !== "verified")) || target.availability !== "available" || !target.preferredGame || !target.gameEdition || !target.platform || !areCompatible({ gameA: input.game, gameB: target.preferredGame, editionA: input.edition, editionB: target.gameEdition, platformA: input.platform, platformB: target.platform })) {
             throw new TRPCError({ code: "PRECONDITION_FAILED", message: "That player is not currently eligible, available, or compatible with the selected game edition and platform." });
           }
           const targetWallet = await ensureKesWalletAccount(tx, target.userId);

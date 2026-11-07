@@ -183,6 +183,35 @@ export const kesWalletRouter = router({
     return db.select().from(kesWalletTransactions).where(eq(kesWalletTransactions.userId, ctx.user.id)).orderBy(desc(kesWalletTransactions.createdAt)).limit(input?.limit ?? 50);
   }),
 
+  submitDepositConfirmation: protectedProcedure.input(z.object({
+    amountKes: z.number().int().positive().optional(),
+    phone: z.string().trim().min(8).max(24).optional(),
+    message: z.string().trim().min(10).max(1000),
+  })).mutation(async ({ ctx, input }) => {
+    const db = await database();
+    await db.insert(notifications).values({
+      userId: ctx.user.id,
+      type: "wallet",
+      title: "Deposit confirmation submitted",
+      body: `Your partner purchase confirmation was submitted${input.amountKes ? ` for KES ${input.amountKes}` : ""}. Admin review is pending.`,
+      entityType: "wallet",
+      entityId: null,
+    });
+    await db.insert(adminAuditLogs).values({
+      adminUserId: ctx.user.id,
+      action: "submit_partner_deposit_confirmation",
+      entityType: "user",
+      entityId: ctx.user.id,
+      reason: "Customer submitted partner purchase confirmation message.",
+      details: JSON.stringify({
+        amountKes: input.amountKes ?? null,
+        phone: input.phone ?? null,
+        message: input.message,
+      }),
+    });
+    return { success: true };
+  }),
+
   requestWithdrawal: protectedProcedure.input(withdrawalForm).mutation(async ({ ctx, input }) => {
     const config = getKesWalletConfig();
     if (!config) throw unavailable();

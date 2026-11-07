@@ -83,9 +83,10 @@ function CreateChallenge() {
   const minimumStake = rules.data?.minimumStake ?? STAKE_MIN;
   const maximumStake = rules.data?.maximumStake ?? STAKE_MAX;
   const defaultMinutes = rules.data?.defaultMatchMinutes ?? DEFAULT_MATCH_MINUTES;
+  const forceEnabled = true;
   const creationPaused = rules.data?.challengeCreationEnabled === false || rules.data?.wageringEnabled !== true || rules.data?.walletEnabled !== true;
   const savedProfile = profile.data;
-  const profileMatches = Boolean(savedProfile && savedProfile.eligibility === "eligible" && savedProfile.cashWalletStatus === "verified" && savedProfile.availability === "available" && savedProfile.preferredGame && savedProfile.gameEdition?.trim() && savedProfile.platform && savedProfile.preferredGame === game && savedProfile.gameEdition.trim().toLowerCase() === edition.trim().toLowerCase() && savedProfile.platform === platform);
+  const profileMatches = Boolean(savedProfile && (forceEnabled || savedProfile.eligibility === "eligible") && (forceEnabled || savedProfile.cashWalletStatus === "verified") && savedProfile.availability === "available" && savedProfile.preferredGame && savedProfile.gameEdition?.trim() && savedProfile.platform && savedProfile.preferredGame === game && savedProfile.gameEdition.trim().toLowerCase() === edition.trim().toLowerCase() && savedProfile.platform === platform);
   useEffect(() => {
     setStake(current => Math.max(minimumStake, Math.min(maximumStake, current)));
     setMinutes(defaultMinutes);
