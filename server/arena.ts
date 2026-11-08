@@ -674,7 +674,7 @@ export const arenaRouter = router({
       const participantRows = await db.select().from(matchParticipants).where(eq(matchParticipants.matchId, input.id));
       if (!participantRows.some(row => row.userId === ctx.user.id)) forbidden();
       if (initialMatch.status !== "AWAITING_EVIDENCE" || !initialMatch.evidenceDeadline || initialMatch.evidenceDeadline.getTime() < Date.now()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The evidence window is closed. The match has been or will be placed in review." });
-      const storageKey = await storePrivateEvidence(input.id, bytes, input.mimeType);
+      const evidence = await storePrivateEvidence(input.id, bytes, input.mimeType);
       return db.transaction(async tx => {
         const rows = await tx.select().from(matches).where(eq(matches.id, input.id)).for("update").limit(1);
         const match = rows[0];
@@ -683,7 +683,7 @@ export const arenaRouter = router({
         if (!participants.some((person: any) => person.userId === ctx.user.id)) forbidden();
         const existing = await tx.select().from(matchEvidence).where(and(eq(matchEvidence.matchId, input.id), eq(matchEvidence.userId, ctx.user.id))).limit(1);
         if (existing.length) throw new TRPCError({ code: "CONFLICT", message: "Evidence has already been submitted for this player." });
-        await tx.insert(matchEvidence).values({ matchId: input.id, userId: ctx.user.id, storageKey, mimeType: input.mimeType, sizeBytes: bytes.length, scoreFor: input.scoreFor, scoreAgainst: input.scoreAgainst, comments: input.comments ?? null, submittedAt: new Date() });
+        await tx.insert(matchEvidence).values({ matchId: input.id, userId: ctx.user.id, storageKey: evidence.storageKey, encryptedBytes: evidence.encryptedBytes ?? null, mimeType: input.mimeType, sizeBytes: bytes.length, scoreFor: input.scoreFor, scoreAgainst: input.scoreAgainst, comments: input.comments ?? null, submittedAt: new Date() });
         await tx.update(matchParticipants).set({ scoreFor: input.scoreFor, scoreAgainst: input.scoreAgainst }).where(and(eq(matchParticipants.matchId, input.id), eq(matchParticipants.userId, ctx.user.id)));
         const allEvidence = await tx.select().from(matchEvidence).where(eq(matchEvidence.matchId, input.id));
         if (allEvidence.length === 2) {
@@ -734,8 +734,8 @@ export const arenaRouter = router({
         if (match.status !== "UNDER_REVIEW") await transitionMatch(tx, match, "UNDER_REVIEW", { disputeReason: input.explanation.slice(0, 500) }, ctx.user.id, `Participant dispute opened: ${input.reason}.`);
         await tx.update(matchRecordings).set({ expiresAt: null }).where(eq(matchRecordings.matchId, input.id));
         if (attachmentBytes && input.mimeType) {
-          const storageKey = await storePrivateEvidence(input.id, attachmentBytes, input.mimeType);
-          await tx.insert(disputeAttachments).values({ disputeId: id, userId: ctx.user.id, storageKey, mimeType: input.mimeType, sizeBytes: attachmentBytes.length });
+          const evidence = await storePrivateEvidence(input.id, attachmentBytes, input.mimeType);
+          await tx.insert(disputeAttachments).values({ disputeId: id, userId: ctx.user.id, storageKey: evidence.storageKey, encryptedBytes: evidence.encryptedBytes ?? null, mimeType: input.mimeType, sizeBytes: attachmentBytes.length });
         }
         for (const person of participants) await notify(tx, person.userId, "dispute_updated", "Match under review", "A participant opened a dispute. Stakes remain reserved pending a reasoned decision.", "dispute", id);
         return { id };

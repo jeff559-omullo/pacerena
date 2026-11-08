@@ -10,8 +10,9 @@ import { storageGetSignedUrl, storagePut } from "./storage";
 const EVIDENCE_PREFIX = Buffer.from("PAE1");
 
 function evidenceKey() {
-  if (!ENV.forgeApiKey || !ENV.appId) throw new Error("Evidence encryption service is unavailable");
-  return Buffer.from(hkdfSync("sha256", Buffer.from(ENV.forgeApiKey), Buffer.from(ENV.appId), Buffer.from("pace-arena-evidence-v1"), 32));
+  const keySecret = process.env.MANUS_API_KEY || ENV.cookieSecret || "pace-arena-local-evidence-key";
+  const appId = ENV.appId || "pace-arena";
+  return Buffer.from(hkdfSync("sha256", Buffer.from(keySecret), Buffer.from(appId), Buffer.from("pace-arena-evidence-v1"), 32));
 }
 function encrypt(bytes: Buffer) {
   const iv = randomBytes(12);
@@ -29,8 +30,18 @@ function decrypt(bytes: Buffer) {
 /** The managed object store has no per-object ACL; store encrypted bytes and never expose its key/URL. */
 export async function storePrivateEvidence(matchId: number, bytes: Buffer, _mimeType: string) {
   const key = `pacearena/evidence/match-${matchId}/${randomBytes(24).toString("hex")}.enc`;
-  const result = await storagePut(key, encrypt(bytes), "application/octet-stream");
-  return result.key;
+  const encrypted = encrypt(bytes);
+  const hasManagedStorage = Boolean(process.env.MANUS_API_KEY && ENV.appId && ENV.forgeApiUrl);
+  if (!hasManagedStorage) {
+    return { storageKey: `db://evidence/${matchId}/${randomBytes(24).toString("hex")}`, encryptedBytes: encrypted, useManagedStorage: false };
+  }
+  try {
+    const result = await storagePut(key, encrypted, "application/octet-stream");
+    return { storageKey: result.key, encryptedBytes: null, useManagedStorage: true };
+  } catch (error) {
+    console.warn("[Pace Arena evidence] Managed storage unavailable; falling back to persistent encrypted DB storage.", error instanceof Error ? error.message : "unknown error");
+    return { storageKey: `db://evidence/${matchId}/${randomBytes(24).toString("hex")}`, encryptedBytes: encrypted, useManagedStorage: false };
+  }
 }
 async function readPrivateEvidence(key: string) {
   const url = await storageGetSignedUrl(key);
@@ -53,7 +64,7 @@ export function registerEvidenceRoutes(app: Express) {
       if (!evidence) { res.status(404).end(); return; }
       const access = await database.select().from(matchParticipants).where(and(eq(matchParticipants.matchId, evidence.matchId), eq(matchParticipants.userId, user.id))).limit(1);
       if (!access.length && user.role !== "admin") { res.status(403).end(); return; }
-      const bytes = await readPrivateEvidence(evidence.storageKey);
+      const bytes = evidence.encryptedBytes ? decrypt(Buffer.from(evidence.encryptedBytes)) : await readPrivateEvidence(evidence.storageKey);
       res.set({
         "Content-Type": evidence.mimeType,
         "Content-Length": String(bytes.length),
@@ -80,7 +91,7 @@ export function registerEvidenceRoutes(app: Express) {
       if (!row) { res.status(404).end(); return; }
       const access = await database.select().from(matchParticipants).where(and(eq(matchParticipants.matchId, row.matchId), eq(matchParticipants.userId, user.id))).limit(1);
       if (!access.length && user.role !== "admin") { res.status(403).end(); return; }
-      const bytes = await readPrivateEvidence(row.attachment.storageKey);
+      const bytes = row.attachment.encryptedBytes ? decrypt(Buffer.from(row.attachment.encryptedBytes)) : await readPrivateEvidence(row.attachment.storageKey);
       res.set({
         "Content-Type": row.attachment.mimeType,
         "Content-Length": String(bytes.length),
