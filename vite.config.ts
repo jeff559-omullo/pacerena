@@ -97,6 +97,18 @@ function vitePluginManusDebugCollector(): Plugin {
     },
 
     configureServer(server: ViteDevServer) {
+      server.middlewares.use("/api", (req, res, next) => {
+        if (req.url === "/api/platform/config.js") return next();
+        if (req.url && req.url.startsWith("/api/")) {
+          const message = "The app API is unavailable. Start the backend server with pnpm dev and try again.";
+          res.statusCode = 503;
+          res.setHeader("Content-Type", "application/json; charset=utf-8");
+          res.end(JSON.stringify({ error: { message, code: "SERVICE_UNAVAILABLE", status: 503 } }));
+          return;
+        }
+        return next();
+      });
+
       // POST /__manus__/logs: Browser sends logs (written directly to files)
       server.middlewares.use("/__manus__/logs", (req, res, next) => {
         if (req.method !== "POST") {

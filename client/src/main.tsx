@@ -1,4 +1,5 @@
 import { trpc } from "@/lib/trpc";
+import { safeJsonFetch } from "@/lib/safeFetch";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { httpBatchLink } from "@trpc/client";
 import { createRoot } from "react-dom/client";
@@ -18,7 +19,7 @@ const trpcClient = trpc.createClient({
     transformer: superjson,
     headers() { return { "X-Pace-Arena-Request": "1" }; },
     fetch(input, init) {
-      return globalThis.fetch(input, { ...(init ?? {}), credentials: "include" });
+      return safeJsonFetch(input, { ...(init ?? {}), credentials: "include" });
     },
   })],
 });

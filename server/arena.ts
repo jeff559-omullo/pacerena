@@ -39,7 +39,7 @@ import {
 import { getDb } from "./db";
 import { canViewChallengeDetails } from "./challenge-access";
 import { adminProcedure, protectedProcedure, router } from "./_core/trpc";
-import { storePrivateEvidence } from "./evidence";
+import { isMissingColumnError, matchEvidenceProjection, storePrivateEvidence, withoutEncryptedBytes } from "./evidence";
 import { cleanupExpiredMatchRecordings } from "./match-recordings";
 import { ensureKesWalletAccount, getKesWalletConfig, isKesWageringEnabled, shouldForceKesFeatures } from "./kes-wallet";
 
@@ -563,7 +563,8 @@ export const arenaRouter = router({
       const participantByUser = new Map(participants.map(row => [row.participant.userId, row]));
       const isAdmin = ctx.user.role === "admin";
       const codes = await db.select().from(matchCodes).where(eq(matchCodes.matchId, input.id));
-      const evidence = await db.select().from(matchEvidence).where(eq(matchEvidence.matchId, input.id));
+      const projection = await matchEvidenceProjection(db);
+      const evidence = await db.select(projection).from(matchEvidence).where(eq(matchEvidence.matchId, input.id));
       const recordingRows = await db.select({ id: matchRecordings.id, userId: matchRecordings.userId, mimeType: matchRecordings.mimeType, sizeBytes: matchRecordings.sizeBytes, uploadedAt: matchRecordings.uploadedAt, expiresAt: matchRecordings.expiresAt, username: profiles.username, side: matchParticipants.side })
         .from(matchRecordings).innerJoin(profiles, eq(profiles.userId, matchRecordings.userId))
         .innerJoin(matchParticipants, and(eq(matchParticipants.matchId, matchRecordings.matchId), eq(matchParticipants.userId, matchRecordings.userId)))
@@ -575,7 +576,15 @@ export const arenaRouter = router({
       const disputeRows = await db.select().from(disputes).where(eq(disputes.matchId, input.id)).orderBy(desc(disputes.createdAt));
       const stateHistory = await db.select().from(matchStateEvents).where(eq(matchStateEvents.matchId, input.id)).orderBy(matchStateEvents.createdAt);
       const disputeIds = disputeRows.map(dispute => dispute.id);
-      const privateAttachments = disputeIds.length ? await db.select().from(disputeAttachments).where(inArray(disputeAttachments.disputeId, disputeIds)) : [];
+      const privateAttachments = disputeIds.length ? await db.select({
+        id: disputeAttachments.id,
+        disputeId: disputeAttachments.disputeId,
+        userId: disputeAttachments.userId,
+        storageKey: disputeAttachments.storageKey,
+        mimeType: disputeAttachments.mimeType,
+        sizeBytes: disputeAttachments.sizeBytes,
+        createdAt: disputeAttachments.createdAt,
+      }).from(disputeAttachments).where(inArray(disputeAttachments.disputeId, disputeIds)) : [];
       return {
         ...data.match,
         game: data.challenge.game,
@@ -683,9 +692,16 @@ export const arenaRouter = router({
         if (!participants.some((person: any) => person.userId === ctx.user.id)) forbidden();
         const existing = await tx.select().from(matchEvidence).where(and(eq(matchEvidence.matchId, input.id), eq(matchEvidence.userId, ctx.user.id))).limit(1);
         if (existing.length) throw new TRPCError({ code: "CONFLICT", message: "Evidence has already been submitted for this player." });
-        await tx.insert(matchEvidence).values({ matchId: input.id, userId: ctx.user.id, storageKey: evidence.storageKey, encryptedBytes: evidence.encryptedBytes ?? null, mimeType: input.mimeType, sizeBytes: bytes.length, scoreFor: input.scoreFor, scoreAgainst: input.scoreAgainst, comments: input.comments ?? null, submittedAt: new Date() });
+        const evidenceRecord = { matchId: input.id, userId: ctx.user.id, storageKey: evidence.storageKey, encryptedBytes: evidence.encryptedBytes ?? null, mimeType: input.mimeType, sizeBytes: bytes.length, scoreFor: input.scoreFor, scoreAgainst: input.scoreAgainst, comments: input.comments ?? null, submittedAt: new Date() };
+        try {
+          await tx.insert(matchEvidence).values(evidenceRecord);
+        } catch (error) {
+          if (!isMissingColumnError(error, "encryptedBytes")) throw error;
+          await tx.insert(matchEvidence).values(withoutEncryptedBytes(evidenceRecord));
+        }
         await tx.update(matchParticipants).set({ scoreFor: input.scoreFor, scoreAgainst: input.scoreAgainst }).where(and(eq(matchParticipants.matchId, input.id), eq(matchParticipants.userId, ctx.user.id)));
-        const allEvidence = await tx.select().from(matchEvidence).where(eq(matchEvidence.matchId, input.id));
+        const evidenceRowsProjection = await matchEvidenceProjection(tx);
+        const allEvidence = await tx.select(evidenceRowsProjection).from(matchEvidence).where(eq(matchEvidence.matchId, input.id));
         if (allEvidence.length === 2) {
           const [first, second] = allEvidence;
           const reportsAgree = first.scoreFor === second.scoreAgainst && first.scoreAgainst === second.scoreFor;
@@ -735,7 +751,13 @@ export const arenaRouter = router({
         await tx.update(matchRecordings).set({ expiresAt: null }).where(eq(matchRecordings.matchId, input.id));
         if (attachmentBytes && input.mimeType) {
           const evidence = await storePrivateEvidence(input.id, attachmentBytes, input.mimeType);
-          await tx.insert(disputeAttachments).values({ disputeId: id, userId: ctx.user.id, storageKey: evidence.storageKey, encryptedBytes: evidence.encryptedBytes ?? null, mimeType: input.mimeType, sizeBytes: attachmentBytes.length });
+          const attachmentRecord = { disputeId: id, userId: ctx.user.id, storageKey: evidence.storageKey, encryptedBytes: evidence.encryptedBytes ?? null, mimeType: input.mimeType, sizeBytes: attachmentBytes.length };
+          try {
+            await tx.insert(disputeAttachments).values(attachmentRecord);
+          } catch (error) {
+            if (!isMissingColumnError(error, "encryptedBytes")) throw error;
+            await tx.insert(disputeAttachments).values(withoutEncryptedBytes(attachmentRecord));
+          }
         }
         for (const person of participants) await notify(tx, person.userId, "dispute_updated", "Match under review", "A participant opened a dispute. Stakes remain reserved pending a reasoned decision.", "dispute", id);
         return { id };
@@ -1000,7 +1022,8 @@ export async function processMatchTimeouts() {
         const current = rows[0];
         if (!current || current.status !== "AWAITING_EVIDENCE" || !current.evidenceDeadline || current.evidenceDeadline.getTime() > Date.now()) return;
         const participants = await getParticipants(tx, match.id);
-        const evidence = await tx.select().from(matchEvidence).where(eq(matchEvidence.matchId, match.id));
+        const evidenceRowsProjection = await matchEvidenceProjection(tx);
+        const evidence = await tx.select(evidenceRowsProjection).from(matchEvidence).where(eq(matchEvidence.matchId, match.id));
         const reason = evidence.length === 0 ? "Neither participant submitted evidence before the five-minute deadline; no automatic winner is awarded." : "One participant did not submit evidence before the five-minute deadline; preserve submitted evidence for a reasoned review.";
         await transitionMatch(tx, current, "UNDER_REVIEW", { disputeReason: reason }, null, reason);
         await tx.update(matchRecordings).set({ expiresAt: null }).where(eq(matchRecordings.matchId, match.id));
