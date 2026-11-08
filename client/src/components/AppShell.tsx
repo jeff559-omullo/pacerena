@@ -4,6 +4,36 @@ import { useEffect, useRef } from "react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 
+function notifyUser(title: string, body: string, tag: string, onClick: () => void) {
+  if (typeof window === "undefined") return;
+  const canUseServiceWorker = "serviceWorker" in navigator && !!navigator.serviceWorker?.controller;
+
+  if (canUseServiceWorker) {
+    void navigator.serviceWorker.getRegistration().then(registration => {
+      if (!registration) return;
+      return registration.showNotification(title, { body, tag });
+    }).catch(() => {
+      toast(title, { description: body, duration: 7000 });
+    });
+    return;
+  }
+
+  if (typeof window.Notification === "function") {
+    try {
+      const browserNotification = new window.Notification(title, { body, tag });
+      browserNotification.onclick = () => {
+        window.focus();
+        onClick();
+      };
+      return;
+    } catch {
+      // Some installed app contexts expose aNotification-like object without a legal constructor.
+    }
+  }
+
+  toast(title, { description: body, duration: 7000 });
+}
+
 const primaryLinks = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/challenges", label: "Challenges", icon: Swords },
@@ -27,7 +57,7 @@ export default function AppShell({ children, admin = false }: { children: React.
   const wallet = trpc.kesWallet.summary.useQuery(undefined, { retry: false, staleTime: 30_000 });
   const unread = trpc.arena.notifications.list.useQuery(undefined, { retry: false, refetchInterval: 30_000 });
   const seenNotificationIds = useRef<Set<number>>(new Set());
-  const supportsNotifications = typeof window !== "undefined" && "Notification" in window;
+  const supportsNotifications = typeof window !== "undefined" && typeof window.Notification === "function" && "Notification" in window;
   const logout = trpc.auth.logout.useMutation({
     onSuccess: async () => {
       await session.refetch();
@@ -63,11 +93,7 @@ export default function AppShell({ children, admin = false }: { children: React.
     for (const item of fresh) {
       const body = item.body || "New update";
       if (supportsNotifications && Notification.permission === "granted") {
-        const browserNotification = new Notification(item.title, { body, tag: `pacearena-${item.id}` });
-        browserNotification.onclick = () => {
-          window.focus();
-          setLocation("/notifications");
-        };
+        notifyUser(item.title, body, `pacearena-${item.id}`, () => setLocation("/notifications"));
       } else {
         toast(item.title, { description: body, duration: 7000 });
       }
