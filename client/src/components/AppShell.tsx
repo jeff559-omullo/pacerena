@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Activity, Bell, ChevronDown, Gamepad2, LayoutDashboard, LogOut, Plus, Shield, Swords, UserRound, UsersRound, WalletCards } from "lucide-react";
+import { Activity, Bell, ChevronDown, Gamepad2, Gift, LayoutDashboard, LogOut, Plus, Shield, Swords, UserRound, UsersRound, WalletCards } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
@@ -50,6 +50,7 @@ const primaryLinks = [
 ];
 const accountLinks = [
   { href: "/wallet", label: "KES wallet", icon: WalletCards },
+  { href: "/referrals", label: "Referrals", icon: Gift },
   { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/profile", label: "Profile & settings", icon: UserRound },
 ];
@@ -75,7 +76,7 @@ export default function AppShell({ children, admin = false }: { children: React.
     onError: error => toast.error(error.message),
   });
   const profile = trpc.arena.profile.me.useQuery(undefined, { retry: false, staleTime: 60_000 });
-  const title = location.startsWith("/challenges") ? "Challenges" : location.startsWith("/players") ? "Players" : location.startsWith("/matches") ? "Matches" : location.startsWith("/wallet") || location.startsWith("/transactions") ? "KES wallet" : location.startsWith("/notifications") ? "Notifications" : location.startsWith("/admin") ? "Operations" : location.startsWith("/profile") || location.startsWith("/settings") ? "Your profile" : "Overview";
+  const title = location.startsWith("/challenges") ? "Challenges" : location.startsWith("/players") ? "Players" : location.startsWith("/matches") ? "Matches" : location.startsWith("/wallet") || location.startsWith("/transactions") ? "KES wallet" : location.startsWith("/referrals") ? "Referrals" : location.startsWith("/notifications") ? "Notifications" : location.startsWith("/admin") ? "Operations" : location.startsWith("/profile") || location.startsWith("/settings") ? "Your profile" : "Overview";
   const badge = unread.data?.filter(item => !item.readAt).length ?? 0;
   const initials = (profile.data?.username ?? session.data?.name ?? "PA").slice(0, 2).toUpperCase();
 
@@ -115,6 +116,7 @@ export default function AppShell({ children, admin = false }: { children: React.
     { href: "/challenges", label: "Play", icon: Gamepad2 },
     { href: "/matches", label: "Matches", icon: Activity },
     { href: "/wallet", label: "Wallet", icon: WalletCards },
+    { href: "/referrals", label: "Refer", icon: Gift },
     { href: "/profile", label: "Profile", icon: UserRound },
     ...(session.data?.role === "admin" ? [{ href: "/admin", label: "Admin", icon: Shield }] : []),
   ];

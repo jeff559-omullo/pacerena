@@ -7,6 +7,7 @@ import { and, eq, gt, isNull } from "drizzle-orm";
 import { authSessions, emailAccounts, profiles, users } from "../drizzle/schema";
 import { normalizeEmail } from "../shared/pace";
 import * as dbHelpers from "./db";
+import { attachReferral, ensureUserReferralCode } from "./referral";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { ENV } from "./_core/env";
 import { PACE_SESSION_COOKIE } from "./_core/context";
@@ -195,7 +196,12 @@ const usernameSchema = z.string().trim().min(3).max(24).regex(/^[a-zA-Z0-9_]+$/,
 
 export const authRouter = router({
   me: publicProcedure.query(({ ctx }) => ctx.user),
-  register: publicProcedure.input(z.object({ email: emailSchema, password: passwordSchema, username: usernameSchema })).mutation(async ({ ctx, input }) => {
+  register: publicProcedure.input(z.object({
+    email: emailSchema,
+    password: passwordSchema,
+    username: usernameSchema,
+    referralCode: z.string().trim().max(16).optional(),
+  })).mutation(async ({ ctx, input }) => {
     rateLimit(ctx, "register");
     safeOrigin(ctx);
     const database = await requireDatabase();
@@ -213,12 +219,24 @@ export const authRouter = router({
         });
         const createdUserId = Number((userInsert as unknown as [{ insertId: number }])[0]?.insertId);
         if (!Number.isSafeInteger(createdUserId) || createdUserId <= 0) throw new Error("Could not create account identity");
+        const referralCode = await ensureUserReferralCode(tx, createdUserId);
+        await tx.update(users).set({ referralCode }).where(eq(users.id, createdUserId));
         await tx.insert(emailAccounts).values({
           userId: createdUserId,
           emailNormalized: email,
           passwordHash: await hashPassword(input.password),
         });
         await tx.insert(profiles).values({ userId: createdUserId, username: input.username, country: "KE", availability: "away", eligibility: "eligible" });
+        try {
+          await attachReferral(tx, createdUserId, input.referralCode);
+        } catch (error) {
+          if (error instanceof TRPCError && error.code === "CONFLICT") {
+            throw error;
+          }
+          if (error instanceof TRPCError && error.code === "BAD_REQUEST") {
+            // Invalid referral codes are ignored but the account still creates successfully.
+          }
+        }
         await tx.insert(authSessions).values({ userId: createdUserId, tokenHash: digest(sessionToken), expiresAt: new Date(Date.now() + SESSION_MS), lastUsedAt: new Date() });
         return createdUserId;
       });

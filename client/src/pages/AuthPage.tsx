@@ -22,9 +22,10 @@ export default function AuthPage({ mode }: { mode: Mode }) {
   const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [referralCode, setReferralCode] = useState(typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("ref") ?? "" : "");
   const [message, setMessage] = useState("");
   const [localError, setLocalError] = useState("");
-  const token = new URLSearchParams(window.location.search).get("token") ?? "";
+  const token = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("token") ?? "" : "";
   const onAuthenticated = async () => {
     await utils.auth.me.invalidate();
     setLocation("/dashboard");
@@ -38,7 +39,7 @@ export default function AuthPage({ mode }: { mode: Mode }) {
     event.preventDefault();
     setLocalError("");
     setMessage("");
-    if (mode === "register") register.mutate({ email, username, password });
+    if (mode === "register") register.mutate({ email, username, password, referralCode: referralCode.trim() || undefined });
     if (mode === "login") login.mutate({ email, password });
     if (mode === "forgot") forgot.mutate({ email });
     if (mode === "reset") reset.mutate({ token, password });
@@ -49,6 +50,7 @@ export default function AuthPage({ mode }: { mode: Mode }) {
   return <AuthFrame><div className="eyebrow-small">{copy.eyebrow}</div><h2>{copy.title}</h2><p>{copy.description}</p>
     {message ? <div className="page-stack"><div className="notice"><MailCheck size={17} style={{ verticalAlign: "-4px", color: "var(--lime)", marginRight: 8 }} />{message}</div><Link className="button button-ghost" href="/login">Back to sign in <ArrowRight size={15} /></Link></div> : <form className="auth-form" onSubmit={submit}>
       {mode === "register" && <div className="field"><label htmlFor="username">Player name</label><input id="username" className="input" autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} minLength={3} maxLength={24} pattern="[A-Za-z0-9_]+" placeholder="e.g. NairobiNo9" required /><span className="field-help">3–24 letters, numbers or underscores. This is public; your email is not.</span></div>}
+      {mode === "register" && <div className="field"><label htmlFor="referral-code">Referral code (optional)</label><input id="referral-code" className="input" value={referralCode} onChange={event => setReferralCode(event.target.value.toUpperCase())} maxLength={16} placeholder="ABCD1234" /><span className="field-help">Enter a code from your invite link if you were referred by a friend.</span></div>}
       {mode !== "reset" && <div className="field"><label htmlFor="email">Email address</label><input id="email" className="input" type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} maxLength={320} placeholder="you@example.com" required /></div>}
       {(mode === "login" || mode === "register" || mode === "reset") && <div className="field"><label htmlFor="password">{mode === "reset" ? "New password" : "Password"}</label><input id="password" className="input" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={event => setPassword(event.target.value)} minLength={mode === "login" ? 1 : 10} maxLength={128} placeholder="At least 10 characters" required /><span className="field-help">Use at least 10 characters.</span></div>}
       {localError && <div className="notice notice-danger" role="alert">{localError}</div>}

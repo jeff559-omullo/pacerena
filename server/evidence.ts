@@ -22,10 +22,32 @@ export function withoutEncryptedBytes<T extends Record<string, unknown>>(record:
   return values;
 }
 
+function normalizeMysqlRows(result: unknown): unknown[] {
+  if (Array.isArray(result)) {
+    if (result.length === 0) return [];
+    const first = result[0];
+    return Array.isArray(first) ? first : result;
+  }
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    for (const candidate of [record.rows, record.result, record.data]) {
+      if (Array.isArray(candidate)) return candidate;
+    }
+  }
+  return [];
+}
+
 export async function databaseHasColumn(database: { execute: (query: string) => Promise<unknown> }, tableName: string, columnName: string): Promise<boolean> {
   try {
-    const [rows] = await database.execute(`SHOW COLUMNS FROM \`${tableName}\` LIKE '${columnName}'`) as [unknown[]];
-    return Array.isArray(rows) && rows.length > 0;
+    const escapedColumnName = columnName.replace(/'/g, "\\'");
+    const result = await database.execute(`SHOW COLUMNS FROM \`${tableName}\` LIKE '${escapedColumnName}'`);
+    const rows = normalizeMysqlRows(result);
+    return rows.some(row => {
+      if (!row || typeof row !== "object") return false;
+      const fields = row as Record<string, unknown>;
+      const value = fields.Field ?? fields.field ?? fields.COLUMN_NAME ?? fields.column_name ?? fields.name ?? null;
+      return typeof value === "string" && value.toLowerCase() === columnName.toLowerCase();
+    });
   } catch {
     return false;
   }
@@ -48,6 +70,21 @@ export async function matchEvidenceProjection(database: { execute: (query: strin
   };
 }
 
+export async function legacyMatchEvidenceProjection() {
+  return {
+    id: matchEvidence.id,
+    matchId: matchEvidence.matchId,
+    userId: matchEvidence.userId,
+    storageKey: matchEvidence.storageKey,
+    mimeType: matchEvidence.mimeType,
+    sizeBytes: matchEvidence.sizeBytes,
+    scoreFor: matchEvidence.scoreFor,
+    scoreAgainst: matchEvidence.scoreAgainst,
+    comments: matchEvidence.comments,
+    submittedAt: matchEvidence.submittedAt,
+  };
+}
+
 export async function disputeAttachmentProjection(database: { execute: (query: string) => Promise<unknown> }) {
   const includeEncryptedBytes = await databaseHasColumn(database, "dispute_attachments", "encryptedBytes");
   return {
@@ -56,6 +93,18 @@ export async function disputeAttachmentProjection(database: { execute: (query: s
     userId: disputeAttachments.userId,
     storageKey: disputeAttachments.storageKey,
     ...(includeEncryptedBytes ? { encryptedBytes: disputeAttachments.encryptedBytes } : {}),
+    mimeType: disputeAttachments.mimeType,
+    sizeBytes: disputeAttachments.sizeBytes,
+    createdAt: disputeAttachments.createdAt,
+  };
+}
+
+export async function legacyDisputeAttachmentProjection() {
+  return {
+    id: disputeAttachments.id,
+    disputeId: disputeAttachments.disputeId,
+    userId: disputeAttachments.userId,
+    storageKey: disputeAttachments.storageKey,
     mimeType: disputeAttachments.mimeType,
     sizeBytes: disputeAttachments.sizeBytes,
     createdAt: disputeAttachments.createdAt,
@@ -96,6 +145,11 @@ export async function storePrivateEvidence(matchId: number, bytes: Buffer, _mime
     return { storageKey: `db://evidence/${matchId}/${randomBytes(24).toString("hex")}`, encryptedBytes: encrypted, useManagedStorage: false };
   }
 }
+
+export async function tryLegacyEvidenceRead(database: { execute: (query: string) => Promise<unknown> }, tableName: string) {
+  const supportsEncryptedBytes = await databaseHasColumn(database, tableName, "encryptedBytes");
+  return supportsEncryptedBytes ? null : true;
+}
 async function readPrivateEvidence(key: string) {
   const url = await storageGetSignedUrl(key);
   const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
@@ -113,13 +167,14 @@ export function registerEvidenceRoutes(app: Express) {
       if (!user) { res.status(401).end(); return; }
       const database = await getDb();
       if (!database) { res.status(503).end(); return; }
-      const projection = await matchEvidenceProjection(database);
+      const hasEncryptedBytes = await databaseHasColumn(database, "match_evidence", "encryptedBytes");
+      const projection = hasEncryptedBytes ? await matchEvidenceProjection(database) : await legacyMatchEvidenceProjection();
       const [evidence] = await database.select(projection).from(matchEvidence).where(eq(matchEvidence.id, id)).limit(1);
       if (!evidence) { res.status(404).end(); return; }
       const access = await database.select().from(matchParticipants).where(and(eq(matchParticipants.matchId, evidence.matchId), eq(matchParticipants.userId, user.id))).limit(1);
       if (!access.length && user.role !== "admin") { res.status(403).end(); return; }
       const record = evidence as Record<string, any>;
-      const bytes = record.encryptedBytes ? decrypt(Buffer.from(record.encryptedBytes)) : await readPrivateEvidence(record.storageKey);
+      const bytes = hasEncryptedBytes && record.encryptedBytes ? decrypt(Buffer.from(record.encryptedBytes)) : await readPrivateEvidence(record.storageKey);
       res.set({
         "Content-Type": record.mimeType,
         "Content-Length": String(bytes.length),
@@ -142,13 +197,14 @@ export function registerEvidenceRoutes(app: Express) {
       if (!user) { res.status(401).end(); return; }
       const database = await getDb();
       if (!database) { res.status(503).end(); return; }
-      const projection = await disputeAttachmentProjection(database);
+      const hasEncryptedBytes = await databaseHasColumn(database, "dispute_attachments", "encryptedBytes");
+      const projection = hasEncryptedBytes ? await disputeAttachmentProjection(database) : await legacyDisputeAttachmentProjection();
       const [row] = await database.select({ attachment: projection, matchId: disputes.matchId }).from(disputeAttachments).innerJoin(disputes, eq(disputes.id, disputeAttachments.disputeId)).where(eq(disputeAttachments.id, id)).limit(1);
       if (!row) { res.status(404).end(); return; }
       const access = await database.select().from(matchParticipants).where(and(eq(matchParticipants.matchId, row.matchId), eq(matchParticipants.userId, user.id))).limit(1);
       if (!access.length && user.role !== "admin") { res.status(403).end(); return; }
       const attachment = row.attachment as Record<string, any>;
-      const bytes = attachment.encryptedBytes ? decrypt(Buffer.from(attachment.encryptedBytes)) : await readPrivateEvidence(attachment.storageKey);
+      const bytes = hasEncryptedBytes && attachment.encryptedBytes ? decrypt(Buffer.from(attachment.encryptedBytes)) : await readPrivateEvidence(attachment.storageKey);
       res.set({
         "Content-Type": attachment.mimeType,
         "Content-Length": String(bytes.length),

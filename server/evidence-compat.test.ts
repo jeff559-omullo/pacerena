@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isMissingColumnError, withoutEncryptedBytes } from "./evidence";
+import { databaseHasColumn, disputeAttachmentProjection, isMissingColumnError, legacyMatchEvidenceProjection, matchEvidenceProjection, withoutEncryptedBytes } from "./evidence";
 
 describe("evidence schema compatibility", () => {
   it("detects missing encryptedBytes column errors from MySQL", () => {
@@ -20,5 +20,30 @@ describe("evidence schema compatibility", () => {
       storageKey: "db://legacy/evidence",
       mimeType: "image/png",
     });
+  });
+
+  it("detects encryptedBytes.columns from mysql2 tuple and object result shapes", async () => {
+    await expect(databaseHasColumn({ execute: async () => [[{ Field: "encryptedBytes" }], []] }, "match_evidence", "encryptedBytes")).resolves.toBe(true);
+    await expect(databaseHasColumn({ execute: async () => ({ rows: [{ Field: "encryptedBytes" }], fields: [] }) }, "dispute_attachments", "encryptedBytes")).resolves.toBe(true);
+    await expect(databaseHasColumn({ execute: async () => ({ rows: [], fields: [] }) }, "match_evidence", "encryptedBytes")).resolves.toBe(false);
+  });
+
+  it("omits encryptedBytes from projections when the column is not present", async () => {
+    const legacyDb = { execute: async () => ({ rows: [], fields: [] }) };
+    const evidenceProjection = await matchEvidenceProjection(legacyDb);
+    const attachmentProjection = await disputeAttachmentProjection(legacyDb);
+
+    expect(evidenceProjection).toEqual(await legacyMatchEvidenceProjection());
+    expect(attachmentProjection).toEqual({
+      id: expect.anything(),
+      disputeId: expect.anything(),
+      userId: expect.anything(),
+      storageKey: expect.anything(),
+      mimeType: expect.anything(),
+      sizeBytes: expect.anything(),
+      createdAt: expect.anything(),
+    });
+    expect(Object.keys(evidenceProjection)).not.toContain("encryptedBytes");
+    expect(Object.keys(attachmentProjection)).not.toContain("encryptedBytes");
   });
 });

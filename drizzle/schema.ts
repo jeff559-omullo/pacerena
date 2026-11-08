@@ -23,11 +23,12 @@ export const users = mysqlTable("users", {
   name: text("name"),
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
+  referralCode: varchar("referralCode", { length: 16 }),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
-});
+}, table => ({ referralCodeUnique: uniqueIndex("user_referral_code_unique").on(table.referralCode) }));
 
 export const emailAccounts = mysqlTable("email_accounts", {
   userId: int("userId").primaryKey().references(() => users.id, { onDelete: "cascade" }),
@@ -345,6 +346,77 @@ export const notifications = mysqlTable("notifications", {
   readAt: timestamp("readAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 }, table => ({ ownerIdx: index("notification_owner_idx").on(table.userId, table.createdAt) }));
+
+export const referrals = mysqlTable("referrals", {
+  id: int("id").autoincrement().primaryKey(),
+  referrerUserId: int("referrerUserId").notNull().references(() => users.id),
+  referredUserId: int("referredUserId").notNull().references(() => users.id),
+  status: mysqlEnum("status", ["ACTIVE", "PENDING", "EXPIRED", "REJECTED"]).default("PENDING").notNull(),
+  source: mysqlEnum("source", ["invite", "manual", "api"]).default("invite").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  expiresAt: timestamp("expiresAt"),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, table => ({
+  referredUnique: uniqueIndex("referral_referred_unique").on(table.referredUserId),
+  referrerIdx: index("referral_referrer_idx").on(table.referrerUserId, table.createdAt),
+  statusIdx: index("referral_status_idx").on(table.status, table.createdAt),
+}));
+
+export const referralSettings = mysqlTable("referral_settings", {
+  id: int("id").primaryKey(),
+  enabled: int("enabled").default(1).notNull(),
+  defaultPercentage: int("defaultPercentage").default(5).notNull(),
+  fixedAmount: int("fixedAmount").default(0).notNull(),
+  minimumQualifyingAmount: int("minimumQualifyingAmount").default(100).notNull(),
+  maxCommissionPerTransaction: int("maxCommissionPerTransaction").default(500).notNull(),
+  maxLifetimeCommissionPerReferral: int("maxLifetimeCommissionPerReferral").default(5000).notNull(),
+  approvalDelayHours: int("approvalDelayHours").default(0).notNull(),
+  minWithdrawalAmount: int("minWithdrawalAmount").default(100).notNull(),
+  rules: text("rules").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, table => ({ singletonId: check("referral_settings_singleton", sql`${table.id} = 1`) }));
+
+export const referralCommissions = mysqlTable("referral_commissions", {
+  id: int("id").autoincrement().primaryKey(),
+  referralId: int("referralId").notNull().references(() => referrals.id, { onDelete: "cascade" }),
+  referrerUserId: int("referrerUserId").notNull().references(() => users.id),
+  referredUserId: int("referredUserId").notNull().references(() => users.id),
+  sourceType: varchar("sourceType", { length: 32 }).notNull(),
+  sourceTransactionId: varchar("sourceTransactionId", { length: 128 }).notNull(),
+  sourceAmountKes: int("sourceAmountKes").notNull(),
+  percentage: int("percentage").default(0).notNull(),
+  fixedAmount: int("fixedAmount").default(0).notNull(),
+  commissionAmountKes: int("commissionAmountKes").notNull(),
+  status: mysqlEnum("status", ["PENDING", "APPROVED", "PAID", "REJECTED"]).default("PENDING").notNull(),
+  idempotencyKey: varchar("idempotencyKey", { length: 128 }).notNull(),
+  reason: varchar("reason", { length: 1000 }),
+  eligibleAt: timestamp("eligibleAt").defaultNow().notNull(),
+  approvedAt: timestamp("approvedAt"),
+  paidAt: timestamp("paidAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => ({
+  idempotencyUnique: uniqueIndex("referral_commission_idempotency_unique").on(table.idempotencyKey),
+  referrerIdx: index("referral_commission_referrer_idx").on(table.referrerUserId, table.createdAt),
+  statusIdx: index("referral_commission_status_idx").on(table.status, table.createdAt),
+  amountPositive: check("referral_commission_amount_positive", sql`${table.commissionAmountKes} >= 0`),
+}));
+
+export const referralWithdrawals = mysqlTable("referral_withdrawals", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull().references(() => users.id),
+  amountKes: int("amountKes").notNull(),
+  status: mysqlEnum("status", ["PENDING", "APPROVED", "PAID", "REJECTED"]).default("PENDING").notNull(),
+  reason: varchar("reason", { length: 500 }),
+  processedBy: int("processedBy").references(() => users.id),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  processedAt: timestamp("processedAt"),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, table => ({
+  userIdx: index("referral_withdrawal_user_idx").on(table.userId, table.createdAt),
+  statusIdx: index("referral_withdrawal_status_idx").on(table.status, table.createdAt),
+  amountPositive: check("referral_withdrawal_amount_positive", sql`${table.amountKes} > 0`),
+}));
 
 export const adminAuditLogs = mysqlTable("admin_audit_logs", {
   id: int("id").autoincrement().primaryKey(),

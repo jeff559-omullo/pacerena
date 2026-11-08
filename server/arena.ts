@@ -690,8 +690,9 @@ export const arenaRouter = router({
         if (!match || match.status !== "AWAITING_EVIDENCE" || !match.evidenceDeadline || match.evidenceDeadline.getTime() < Date.now()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "The evidence window expired before upload completed." });
         const participants = await getParticipants(tx, input.id);
         if (!participants.some((person: any) => person.userId === ctx.user.id)) forbidden();
-        const existing = await tx.select().from(matchEvidence).where(and(eq(matchEvidence.matchId, input.id), eq(matchEvidence.userId, ctx.user.id))).limit(1);
-        if (existing.length) throw new TRPCError({ code: "CONFLICT", message: "Evidence has already been submitted for this player." });
+        const existingProjection = await matchEvidenceProjection(tx);
+        const [existing] = await tx.select(existingProjection).from(matchEvidence).where(and(eq(matchEvidence.matchId, input.id), eq(matchEvidence.userId, ctx.user.id))).limit(1);
+        if (existing) throw new TRPCError({ code: "CONFLICT", message: "Evidence has already been submitted for this player." });
         const evidenceRecord = { matchId: input.id, userId: ctx.user.id, storageKey: evidence.storageKey, encryptedBytes: evidence.encryptedBytes ?? null, mimeType: input.mimeType, sizeBytes: bytes.length, scoreFor: input.scoreFor, scoreAgainst: input.scoreAgainst, comments: input.comments ?? null, submittedAt: new Date() };
         try {
           await tx.insert(matchEvidence).values(evidenceRecord);
